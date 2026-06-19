@@ -32,9 +32,59 @@
 #include "asm_pa_decode_bf16_configs.hpp"
 #include <hip/hip_runtime.h>
 #include <cmath>
+#include <cstddef>   // offsetof (preload kernarg ABI static_asserts)
 #include <string>
 
+// PA_KARG_PRELOAD must match USE_KARG_PRELOAD in the deployed SP3 / the
+// .amdhsa_user_sgpr_kernarg_preload_length of the installed .co (and PA_KARG_PRELOAD
+// in sched2/pa_ps.cpp). 1 = tight 0x98 ABI whose first 0x78 (30 dwords) is
+// hardware-preloaded into s2..s31; 0 = legacy 0x170 16-byte-slot ABI.
+#ifndef PA_KARG_PRELOAD
+#define PA_KARG_PRELOAD 1
+#endif
+
 #pragma pack(push, 1)
+#if PA_KARG_PRELOAD
+struct KernelArgs
+{
+    // TIGHT preload ABI. First 30 dwords (to 0x78) are CP-preloaded into s2..s31
+    // in this EXACT order: 12 pointers then 6 scalars. The spilled tail
+    // (SplitO/SplitLSE/Sink/GQA) is s_load'ed by the kernel. QOIndptr dropped.
+    void* ptr_O;            // 0x00  R_addr (output, bf16)
+    void* ptr_Q;            // 0x08  Q_addr (FP8)
+    void* ptr_K;            // 0x10  K_addr (FP8 paged)
+    void* ptr_V;            // 0x18  V_addr (FP8 paged)
+    void* ptr_KVIndices;    // 0x20  flattened physical page ids
+    void* ptr_CL;           // 0x28  context lengths
+    void* ptr_KVIndptr;     // 0x30  KVIndptr
+    void* ptr_WorkPtr;      // 0x38  WorkPtr
+    void* ptr_WorkInfo;     // 0x40  WorkInfo
+    void* ptr_QScale;       // 0x48  per-tensor Q scale (scalar)
+    void* ptr_KScale;       // 0x50  per-tensor K scale (scalar)
+    void* ptr_VScale;       // 0x58  per-tensor V scale (scalar)
+    unsigned int kv_nheads; // 0x60  kv_head_num
+    unsigned int Qs;        // 0x64  bytes per MTP layer in FP8 Q
+    unsigned int Bs;        // 0x68  K_blk_stride
+    unsigned int KVs;       // 0x6C  K_head_stride
+    unsigned int mtp;       // 0x70  mtp
+    float softmax_scale;    // 0x74  attention softmax scale (by value)
+    // ---- end preload region (0x78, 30 dwords) ----
+    void* ptr_SplitO;       // 0x78  SplitO
+    void* ptr_SplitLSE;     // 0x80  SplitLSE
+    void* ptr_Sink;         // 0x88  SinkBuffer (scaled-domain logits, exp(sink))
+    unsigned int GQA;       // 0x90  gqa_ratio
+    unsigned int _tail_pad; // 0x94  -> total 0x98 (8B kernarg align)
+};
+#pragma pack(pop)
+static_assert(sizeof(KernelArgs) == 0x98,
+              "asm_pa_decode_bf16: preload KernelArgs must be 0x98 B");
+static_assert(offsetof(KernelArgs, ptr_QScale)    == 0x48, "QScale offset");
+static_assert(offsetof(KernelArgs, kv_nheads)     == 0x60, "kv_nheads offset");
+static_assert(offsetof(KernelArgs, softmax_scale) == 0x74, "softmax_scale offset");
+static_assert(offsetof(KernelArgs, ptr_SplitO)    == 0x78, "SplitO offset");
+static_assert(offsetof(KernelArgs, ptr_Sink)      == 0x88, "Sink offset");
+static_assert(offsetof(KernelArgs, GQA)           == 0x90, "GQA offset");
+#else
 struct KernelArgs
 {
     void* ptr_O;          p2 _p0;    // 0x000  R_addr (output, bf16)
@@ -65,6 +115,7 @@ struct KernelArgs
 static_assert(sizeof(KernelArgs) == 0x170,
               "asm_pa_decode_bf16: KernelArgs must be 0x170 B (matches SP3 s_load offsets; "
               "softmax_scale by-value at 0x60)");
+#endif
 
 // Kernel-side constants (must match SP3).
 static constexpr int PA_HEAD_DIM  = 64;
@@ -211,7 +262,9 @@ AITER_CTYPES_DEFINE_ENTRYPOINT_VOID(
     args.KVs           = (unsigned int)stride_KV_head;
     args.mtp           = (unsigned int)mtp;
     args.GQA           = (unsigned int)gqa;
-    args.ptr_QOIndptr  = (qo_indptr != nullptr) ? qo_indptr->data_ptr() : nullptr;
+#if !PA_KARG_PRELOAD
+    args.ptr_QOIndptr  = (qo_indptr != nullptr) ? qo_indptr->data_ptr() : nullptr;  // dropped in tight ABI
+#endif
     args.ptr_KVIndptr  = kv_indptr->data_ptr();
     args.ptr_WorkPtr   = (work_indptr != nullptr) ? work_indptr->data_ptr() : nullptr;
     args.ptr_WorkInfo  = (work_info != nullptr) ? work_info->data_ptr() : nullptr;
