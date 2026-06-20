@@ -45,13 +45,13 @@
 
 #if PA_KARG_PRELOAD
 // RSPILL tight preload ABI (matches PA_DECODE_D64_1TG_4W_PS.sp3.willa_fix.preload.rspill).
-// First 30 dwords (to 0x78) are CP-preloaded into s2..s31: 11 pointers + 7 scalars
-// (incl gqa_ratio) + 1-dword pad. The OUTPUTS — ptr_O(R)/SplitO/SplitLSE — are
-// SPILLED (used only by the late store paths) and s_load'ed by the kernel, with
-// ptr_Sink. QOIndptr dropped.
-// NOT packed: natural alignment. 11 ptrs (88B) + 7 scalars (28B) -> the next
-// pointer needs 8-align, so a 4B pad sits at 0x74 (explicit _pad0 so the sp3cvt
-// parser, which sums member sizes, computes matching offsets). static_asserts pin it.
+// First 30 dwords (to 0x78) are CP-preloaded into s2..s31: 8 pointers + 14 scalars
+// (incl gqa_ratio and the by-value q/k/v scales) + 4-dword pad. The OUTPUTS —
+// ptr_O(R)/SplitO/SplitLSE — are SPILLED (used only by the late store paths) and
+// s_load'ed by the kernel, with ptr_Sink. QOIndptr dropped.
+// NOT packed: natural alignment. Scales are by-value f32 (s25/s26/s27 in SP3 =
+// 0x5C/0x60/0x64); explicit _pad0..3 8-align ptr_O so the sp3cvt parser (which
+// sums member sizes) computes matching offsets. static_asserts pin it.
 struct KernelArgs
 {
     void* ptr_Q;            // 0x00  Q_addr (FP8)
@@ -62,17 +62,20 @@ struct KernelArgs
     void* ptr_KVIndptr;     // 0x28  KVIndptr
     void* ptr_WorkPtr;      // 0x30  WorkPtr
     void* ptr_WorkInfo;     // 0x38  WorkInfo
-    void* ptr_QScale;       // 0x40  per-tensor Q scale (scalar)
-    void* ptr_KScale;       // 0x48  per-tensor K scale (scalar)
-    void* ptr_VScale;       // 0x50  per-tensor V scale (scalar)
-    unsigned int kv_nheads; // 0x58  kv_head_num
-    unsigned int Qs;        // 0x5C  bytes per MTP layer in FP8 Q
-    unsigned int Bs;        // 0x60  K_blk_stride
-    unsigned int KVs;       // 0x64  K_head_stride
-    unsigned int mtp;       // 0x68  mtp
-    float softmax_scale;    // 0x6C  attention softmax scale (by value)
-    unsigned int GQA;       // 0x70  gqa_ratio
-    unsigned int _pad0;     // 0x74  (8-aligns ptr_O; preloaded as s31 pad)
+    unsigned int kv_nheads; // 0x40  kv_head_num
+    unsigned int Qs;        // 0x44  bytes per MTP layer in FP8 Q
+    unsigned int Bs;        // 0x48  K_blk_stride
+    unsigned int KVs;       // 0x4C  K_head_stride
+    unsigned int mtp;       // 0x50  mtp
+    float softmax_scale;    // 0x54  attention softmax scale (by value)
+    unsigned int GQA;       // 0x58  gqa_ratio
+    float query_scale;      // 0x5C  per-tensor Q scale (by value, s25)
+    float key_scale;        // 0x60  per-tensor K scale (by value, s26)
+    float value_scale;      // 0x64  per-tensor V scale (by value, s27)
+    unsigned int _pad0;     // 0x68  (pad; preloaded as s28)
+    unsigned int _pad1;     // 0x6C  (pad; preloaded as s29)
+    unsigned int _pad2;     // 0x70  (pad; preloaded as s30)
+    unsigned int _pad3;     // 0x74  (8-aligns ptr_O; preloaded as s31)
     // ---- end preload region (0x78, 30 dwords) ----
     void* ptr_O;            // 0x78  R_addr (output, bf16) — spilled
     void* ptr_SplitO;       // 0x80  SplitO — spilled
@@ -81,10 +84,12 @@ struct KernelArgs
 };
 static_assert(sizeof(KernelArgs) == 0x98,
               "asm_pa_decode_bf16: rspill preload KernelArgs must be 0x98 (152) B");
-static_assert(offsetof(KernelArgs, ptr_QScale)    == 0x40, "QScale offset");
-static_assert(offsetof(KernelArgs, kv_nheads)     == 0x58, "kv_nheads offset");
-static_assert(offsetof(KernelArgs, softmax_scale) == 0x6C, "softmax_scale offset");
-static_assert(offsetof(KernelArgs, GQA)           == 0x70, "GQA offset");
+static_assert(offsetof(KernelArgs, kv_nheads)     == 0x40, "kv_nheads offset");
+static_assert(offsetof(KernelArgs, softmax_scale) == 0x54, "softmax_scale offset");
+static_assert(offsetof(KernelArgs, GQA)           == 0x58, "GQA offset");
+static_assert(offsetof(KernelArgs, query_scale)   == 0x5C, "query_scale offset");
+static_assert(offsetof(KernelArgs, key_scale)     == 0x60, "key_scale offset");
+static_assert(offsetof(KernelArgs, value_scale)   == 0x64, "value_scale offset");
 static_assert(offsetof(KernelArgs, ptr_O)         == 0x78, "O offset");
 static_assert(offsetof(KernelArgs, ptr_SplitO)    == 0x80, "SplitO offset");
 static_assert(offsetof(KernelArgs, ptr_Sink)      == 0x90, "Sink offset");
@@ -99,9 +104,9 @@ struct KernelArgs
     void* ptr_KVIndices;  p2 _p4;    // 0x040  flattened physical page ids
     void* ptr_CL;         p2 _p5;    // 0x050  context lengths
     float softmax_scale;  p3 _p6;    // 0x060  attention softmax scale (by value)
-    void* ptr_QScale;     p2 _p7;    // 0x070  per-tensor Q scale (scalar)
-    void* ptr_KScale;     p2 _p8;    // 0x080  per-tensor K scale (scalar)
-    void* ptr_VScale;     p2 _p9;    // 0x090  per-tensor V scale (scalar)
+    float query_scale;    p3 _p7;    // 0x070  per-tensor Q scale (by value)
+    float key_scale;      p3 _p8;    // 0x080  per-tensor K scale (by value)
+    float value_scale;    p3 _p9;    // 0x090  per-tensor V scale (by value)
     unsigned int kv_nheads; p3 _p10; // 0x0A0  kv_head_num
     unsigned int Qs;      p3 _p11;   // 0x0B0  bytes per MTP layer in FP8 Q
     unsigned int Bs;      p3 _p12;   // 0x0C0  K_blk_stride
@@ -166,8 +171,8 @@ AITER_CTYPES_ERROR_DEF
 // out     : bf16, same logical layout as Q.
 // kv_indices / kv_indptr / context_lens / qo_indptr : persistent metadata.
 // work_indptr / work_info / split_o / split_lse      : persistent work split.
-// q_scale / k_scale / v_scale : 1-element fp32 device tensors (per-tensor
-//           dequant; per-tensor scales only).
+// q_scale / k_scale / v_scale : per-tensor fp32 dequant scales, passed BY VALUE
+//           (per-tensor scales only; folded with softmax_scale in-kernel).
 // softmax_scale : attention scale (e.g. 1/sqrt(head_dim)), passed BY VALUE at
 //           kernarg 0x60.  The kernel folds query_scale*key_scale*softmax_scale
 //           *log2(e) into scl_log2e (caller does NOT pre-fold it).
@@ -181,9 +186,9 @@ AITER_CTYPES_DEFINE_ENTRYPOINT_VOID(
      aiter_tensor_t* kv_indices,
      aiter_tensor_t* context_lens,
      float           softmax_scale,
-     aiter_tensor_t* q_scale,
-     aiter_tensor_t* k_scale,
-     aiter_tensor_t* v_scale,
+     float           q_scale,
+     float           k_scale,
+     float           v_scale,
      aiter_tensor_t* out,
      aiter_tensor_t* qo_indptr,
      aiter_tensor_t* kv_indptr,
@@ -201,10 +206,9 @@ AITER_CTYPES_DEFINE_ENTRYPOINT_VOID(
      gqa, mtp, kernelName_, stream))
 {
     // ---- null safety (validate before touching the device) ----------------
-    AITER_CHECK(Q && K && V && kv_indices && context_lens && q_scale && k_scale &&
-                    v_scale && out && kv_indptr && sink,
-                "pa_decode_bf16_asm: Q/K/V/kv_indices/context_lens/q_scale/k_scale/"
-                "v_scale/out/kv_indptr/sink must all be non-null");
+    AITER_CHECK(Q && K && V && kv_indices && context_lens && out && kv_indptr && sink,
+                "pa_decode_bf16_asm: Q/K/V/kv_indices/context_lens/out/kv_indptr/sink "
+                "must all be non-null");
 
     HipDeviceGuard device_guard{Q->device_id};
 
@@ -217,10 +221,6 @@ AITER_CTYPES_DEFINE_ENTRYPOINT_VOID(
     AITER_CHECK(K->dtype() == AITER_DTYPE_fp8 && V->dtype() == AITER_DTYPE_fp8,
                 "pa_decode_bf16_asm: K/V must be fp8");
     AITER_CHECK(out->dtype() == AITER_DTYPE_bf16, "pa_decode_bf16_asm: out must be bf16");
-    AITER_CHECK(q_scale->dtype() == AITER_DTYPE_fp32 &&
-                    k_scale->dtype() == AITER_DTYPE_fp32 &&
-                    v_scale->dtype() == AITER_DTYPE_fp32,
-                "pa_decode_bf16_asm: q/k/v scales must be fp32");
     AITER_CHECK(sink->dtype() == AITER_DTYPE_fp32, "pa_decode_bf16_asm: sink must be fp32");
 
     // ---- dimensions -------------------------------------------------------
@@ -257,10 +257,10 @@ AITER_CTYPES_DEFINE_ENTRYPOINT_VOID(
     args.ptr_V         = V->data_ptr();
     args.ptr_KVIndices = kv_indices->data_ptr();
     args.ptr_CL        = context_lens->data_ptr();
-    args.softmax_scale = softmax_scale;                 // by-value f32 @ 0x60
-    args.ptr_QScale    = q_scale->data_ptr();
-    args.ptr_KScale    = k_scale->data_ptr();
-    args.ptr_VScale    = v_scale->data_ptr();
+    args.softmax_scale = softmax_scale;                 // by-value f32
+    args.query_scale   = q_scale;                       // by-value f32
+    args.key_scale     = k_scale;                       // by-value f32
+    args.value_scale   = v_scale;                       // by-value f32
     args.kv_nheads     = (unsigned int)kv_head_num;
     args.Qs            = (unsigned int)stride_Q;
     args.Bs            = (unsigned int)stride_KV_blk;

@@ -419,9 +419,9 @@ def _pa_decode_bf16_asm(
     kv_indices: torch.Tensor,
     context_lens: torch.Tensor,
     softmax_scale: float,
-    q_scale: torch.Tensor,
-    k_scale: torch.Tensor,
-    v_scale: torch.Tensor,
+    q_scale: float,
+    k_scale: float,
+    v_scale: float,
     out: torch.Tensor,
     qo_indptr: Optional[torch.Tensor],
     kv_indptr: torch.Tensor,
@@ -479,22 +479,6 @@ def pa_decode_bf16_asm(
     if out is None:
         out = torch.empty(Q.shape, dtype=torch.bfloat16, device=device)
 
-    def _scale_tensor(scale: float | torch.Tensor, multiplier: float = 1.0):
-        if isinstance(scale, torch.Tensor):
-            scale = scale.to(device=device, dtype=torch.float32).reshape(-1)[:1]
-            if multiplier != 1.0:
-                scale = scale * multiplier
-            return scale.contiguous()
-        return torch.tensor(
-            [float(scale) * multiplier], dtype=torch.float32, device=device
-        )
-
-    q_scale = _scale_tensor(query_scale)
-    # softmax_scale is passed BY VALUE (kernarg 0x60); the kernel applies it, so
-    # do NOT pre-fold it into key_scale.
-    k_scale = _scale_tensor(key_scale)
-    v_scale = _scale_tensor(value_scale)
-
     if sink is None:
         # The kernel is compiled sink-enabled (always reads + merges the sink
         # slot), so default to a FINITE large-negative buffer (numerical no-op:
@@ -511,9 +495,9 @@ def pa_decode_bf16_asm(
         kv_indices,
         context_lens,
         softmax_scale,
-        q_scale,
-        k_scale,
-        v_scale,
+        query_scale,
+        key_scale,
+        value_scale,
         out,
         qo_indptr,
         kv_indptr,
