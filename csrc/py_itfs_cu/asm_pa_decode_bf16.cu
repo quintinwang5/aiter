@@ -43,48 +43,53 @@
 #define PA_KARG_PRELOAD 1
 #endif
 
-#pragma pack(push, 1)
 #if PA_KARG_PRELOAD
+// RSPILL tight preload ABI (matches PA_DECODE_D64_1TG_4W_PS.sp3.willa_fix.preload.rspill).
+// First 30 dwords (to 0x78) are CP-preloaded into s2..s31: 11 pointers + 7 scalars
+// (incl gqa_ratio) + 1-dword pad. The OUTPUTS — ptr_O(R)/SplitO/SplitLSE — are
+// SPILLED (used only by the late store paths) and s_load'ed by the kernel, with
+// ptr_Sink. QOIndptr dropped.
+// NOT packed: natural alignment. 11 ptrs (88B) + 7 scalars (28B) -> the next
+// pointer needs 8-align, so a 4B pad sits at 0x74 (explicit _pad0 so the sp3cvt
+// parser, which sums member sizes, computes matching offsets). static_asserts pin it.
 struct KernelArgs
 {
-    // TIGHT preload ABI. First 30 dwords (to 0x78) are CP-preloaded into s2..s31
-    // in this EXACT order: 12 pointers then 6 scalars. The spilled tail
-    // (SplitO/SplitLSE/Sink/GQA) is s_load'ed by the kernel. QOIndptr dropped.
-    void* ptr_O;            // 0x00  R_addr (output, bf16)
-    void* ptr_Q;            // 0x08  Q_addr (FP8)
-    void* ptr_K;            // 0x10  K_addr (FP8 paged)
-    void* ptr_V;            // 0x18  V_addr (FP8 paged)
-    void* ptr_KVIndices;    // 0x20  flattened physical page ids
-    void* ptr_CL;           // 0x28  context lengths
-    void* ptr_KVIndptr;     // 0x30  KVIndptr
-    void* ptr_WorkPtr;      // 0x38  WorkPtr
-    void* ptr_WorkInfo;     // 0x40  WorkInfo
-    void* ptr_QScale;       // 0x48  per-tensor Q scale (scalar)
-    void* ptr_KScale;       // 0x50  per-tensor K scale (scalar)
-    void* ptr_VScale;       // 0x58  per-tensor V scale (scalar)
-    unsigned int kv_nheads; // 0x60  kv_head_num
-    unsigned int Qs;        // 0x64  bytes per MTP layer in FP8 Q
-    unsigned int Bs;        // 0x68  K_blk_stride
-    unsigned int KVs;       // 0x6C  K_head_stride
-    unsigned int mtp;       // 0x70  mtp
-    float softmax_scale;    // 0x74  attention softmax scale (by value)
+    void* ptr_Q;            // 0x00  Q_addr (FP8)
+    void* ptr_K;            // 0x08  K_addr (FP8 paged)
+    void* ptr_V;            // 0x10  V_addr (FP8 paged)
+    void* ptr_KVIndices;    // 0x18  flattened physical page ids
+    void* ptr_CL;           // 0x20  context lengths
+    void* ptr_KVIndptr;     // 0x28  KVIndptr
+    void* ptr_WorkPtr;      // 0x30  WorkPtr
+    void* ptr_WorkInfo;     // 0x38  WorkInfo
+    void* ptr_QScale;       // 0x40  per-tensor Q scale (scalar)
+    void* ptr_KScale;       // 0x48  per-tensor K scale (scalar)
+    void* ptr_VScale;       // 0x50  per-tensor V scale (scalar)
+    unsigned int kv_nheads; // 0x58  kv_head_num
+    unsigned int Qs;        // 0x5C  bytes per MTP layer in FP8 Q
+    unsigned int Bs;        // 0x60  K_blk_stride
+    unsigned int KVs;       // 0x64  K_head_stride
+    unsigned int mtp;       // 0x68  mtp
+    float softmax_scale;    // 0x6C  attention softmax scale (by value)
+    unsigned int GQA;       // 0x70  gqa_ratio
+    unsigned int _pad0;     // 0x74  (8-aligns ptr_O; preloaded as s31 pad)
     // ---- end preload region (0x78, 30 dwords) ----
-    void* ptr_SplitO;       // 0x78  SplitO
-    void* ptr_SplitLSE;     // 0x80  SplitLSE
-    void* ptr_Sink;         // 0x88  SinkBuffer (scaled-domain logits, exp(sink))
-    unsigned int GQA;       // 0x90  gqa_ratio
-    unsigned int _tail_pad; // 0x94  -> total 0x98 (8B kernarg align)
+    void* ptr_O;            // 0x78  R_addr (output, bf16) — spilled
+    void* ptr_SplitO;       // 0x80  SplitO — spilled
+    void* ptr_SplitLSE;     // 0x88  SplitLSE — spilled
+    void* ptr_Sink;         // 0x90  SinkBuffer (scaled-domain logits, exp(sink)) — spilled
 };
-#pragma pack(pop)
 static_assert(sizeof(KernelArgs) == 0x98,
-              "asm_pa_decode_bf16: preload KernelArgs must be 0x98 B");
-static_assert(offsetof(KernelArgs, ptr_QScale)    == 0x48, "QScale offset");
-static_assert(offsetof(KernelArgs, kv_nheads)     == 0x60, "kv_nheads offset");
-static_assert(offsetof(KernelArgs, softmax_scale) == 0x74, "softmax_scale offset");
-static_assert(offsetof(KernelArgs, ptr_SplitO)    == 0x78, "SplitO offset");
-static_assert(offsetof(KernelArgs, ptr_Sink)      == 0x88, "Sink offset");
-static_assert(offsetof(KernelArgs, GQA)           == 0x90, "GQA offset");
+              "asm_pa_decode_bf16: rspill preload KernelArgs must be 0x98 (152) B");
+static_assert(offsetof(KernelArgs, ptr_QScale)    == 0x40, "QScale offset");
+static_assert(offsetof(KernelArgs, kv_nheads)     == 0x58, "kv_nheads offset");
+static_assert(offsetof(KernelArgs, softmax_scale) == 0x6C, "softmax_scale offset");
+static_assert(offsetof(KernelArgs, GQA)           == 0x70, "GQA offset");
+static_assert(offsetof(KernelArgs, ptr_O)         == 0x78, "O offset");
+static_assert(offsetof(KernelArgs, ptr_SplitO)    == 0x80, "SplitO offset");
+static_assert(offsetof(KernelArgs, ptr_Sink)      == 0x90, "Sink offset");
 #else
+#pragma pack(push, 1)
 struct KernelArgs
 {
     void* ptr_O;          p2 _p0;    // 0x000  R_addr (output, bf16)
