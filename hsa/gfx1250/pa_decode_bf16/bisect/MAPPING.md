@@ -15,6 +15,7 @@ PA_DECODE_D64_1TG_4W_PS.sp3.willa_fix.preload.rspill_2.tq16 with `var BISECT=N`.
 | tq16_b5.co  | 5      | SplitLSE store (buffer_store)           |
 | tq16_b6.co  | 6      | SplitO store (buffer_store)             |
 | tq16_b7.co  | 7      | sink load (global_load_b32 v_SINK)      |
+| tq16_b8.co  | 8      | block-table scalar load (kv_indices)    |
 
 Deployed kernel name (what aiter loads): pa_decode_bf16_d64_page256_gqa8_tq16.co
 To test one variant: copy tq16_bN.co over that name, then run the failing
