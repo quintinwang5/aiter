@@ -33,6 +33,7 @@
 #include <hip/hip_runtime.h>
 #include <cmath>
 #include <cstddef>   // offsetof (preload kernarg ABI static_asserts)
+#include <limits>    // std::numeric_limits (tile_q selection)
 #include <string>
 
 // PA_KARG_PRELOAD must match USE_KARG_PRELOAD in the deployed SP3 / the
@@ -134,14 +135,24 @@ static constexpr int PA_GQA_RATIO = 8;
 static constexpr int PA_BDX       = 128;   // 4 waves * 32 lanes (wave32)
 
 // Kernel selection on the small set of keys captured by the csv manifest.
+//
+// tile_q selection: the manifest carries multiple TileQ variants for the same
+// (qdtype,kvdtype,hdim,page_size,gqa) key — e.g. TileQ=16 (1 WMMA M-tile, valid
+// for mtp in {0,1}) and TileQ=32 (2 M-tiles, mtp in {0..3}). A variant is usable
+// only if its query tile holds all (mtp+1) MTP layers of every GQA group, i.e.
+// (mtp+1)*gqa <= tile_q. We pick the SMALLEST usable tile_q (fewer M-tiles =
+// less work / fewer VGPRs) so short-MTP decodes run on the cheaper kernel.
 static std::string get_heuristic_kernel_pa_decode_bf16(const std::string& qdtype,
                                                        const std::string& kvdtype,
                                                        int hdim,
                                                        int page_size,
                                                        int gqa,
+                                                       int mtp,
                                                        const std::string& arch_id,
                                                        CFG* cfgs)
 {
+    std::string best_key;
+    int best_tile_q = std::numeric_limits<int>::max();
     for(const auto& el : *cfgs)
     {
         if(el.first.find(arch_id) != 0)
@@ -152,13 +163,20 @@ static std::string get_heuristic_kernel_pa_decode_bf16(const std::string& qdtype
         if(cfg.hdim != hdim)            continue;
         if(cfg.page_size != page_size)  continue;
         if(cfg.gqa != gqa)              continue;
-        return el.first;
+        if((mtp + 1) * gqa > cfg.tile_q) continue;   // tile too small for this mtp
+        if(cfg.tile_q < best_tile_q)                 // prefer smallest usable tile
+        {
+            best_tile_q = cfg.tile_q;
+            best_key    = el.first;
+        }
     }
+    if(!best_key.empty())
+        return best_key;
     AITER_CHECK(false,
                 "asm_pa_decode_bf16: no kernel for qdtype=", qdtype,
                 " kvdtype=", kvdtype, " hdim=", hdim,
                 " page_size=", page_size, " gqa=", gqa,
-                " arch=", arch_id);
+                " mtp=", mtp, " arch=", arch_id);
     return "";
 }
 
@@ -287,7 +305,7 @@ AITER_CTYPES_DEFINE_ENTRYPOINT_VOID(
                                  ? (arch_id + std::string(kernelName_))
                                  : get_heuristic_kernel_pa_decode_bf16(
                                        "fp8", "fp8", head_dim, page_size, gqa,
-                                       arch_id, config_map);
+                                       mtp, arch_id, config_map);
     auto it = config_map->find(kernel_key);
     AITER_CHECK(it != config_map->end(),
                 "pa_decode_bf16_asm: kernel not found in CFG: ", kernel_key);
