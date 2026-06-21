@@ -1015,157 +1015,158 @@ def test_pa_decode_vmask(
     }
 
 
-parser = argparse.ArgumentParser(
-    formatter_class=argparse.RawTextHelpFormatter,
-    description="config input of pa_decode_bf16_asm test",
-)
-parser.add_argument(
-    "-b",
-    "--batch_size",
-    type=int,
-    nargs="*",
-    default=[1, 3, 8, 64],
-    help="""Batch size.
-    e.g. -b 1 3 8 64""",
-)
-parser.add_argument(
-    "-kvh",
-    "--kv_head_num",
-    type=int,
-    nargs="*",
-    default=[1, 8],
-    help="""Number of KV heads (q heads = kv_head_num * gqa(8)).
-    e.g. -kvh 1 8""",
-)
-parser.add_argument(
-    "-c",
-    "--ctx_len",
-    type=int,
-    nargs="*",
-    default=[7, 256, 1024, 4097, 16384],
-    help="""Context length (arbitrary; multi-page when > 256).
-    e.g. -c 256 4097""",
-)
-parser.add_argument(
-    "-m",
-    "--mtp",
-    type=int,
-    nargs="*",
-    default=[0],
-    help="""Multi-token-predict layers (qlen = mtp+1). Kernel requires mtp < 4.
-    e.g. -m 0 1 2 3""",
-)
-parser.add_argument(
-    "--varlen",
-    action="store_true",
-    help="""Variable kv seqlens per batch (random in [1, ctx_len]). Default: False.""",
-)
-parser.add_argument(
-    "--scales",
-    type=float,
-    nargs=3,
-    default=None,
-    metavar=("Q", "K", "V"),
-    help="""Per-tensor q/k/v dequant scales by hand, e.g. --scales 0.5 2.0 1.5.
-    Default: random scales per config.""",
-)
-parser.add_argument(
-    "--sink",
-    action="store_true",
-    help="""Enable GPT-OSS attention sink: random per-Q-head sink logits passed to
-    the kernel + matching sink term in the reference. Requires the sink-enabled
-    kernel binary; with the current .co the kernel ignores it and this fails.""",
-)
-parser.add_argument(
-    "--context_lens",
-    type=int,
-    nargs="*",
-    default=None,
-    help="""Explicit per-sequence context lengths for ONE shape (e.g. a context_lens
-    tensor dumped from a production run). batch = number of values given; overrides
-    -b/-c/--varlen. e.g. --context_lens 462 549 670 520 ...""",
-)
-parser.add_argument(
-    "--vmask",
-    action="store_true",
-    help="""Run the V-mask NaN-vs-zero bit-match test instead of the accuracy test:
-    fill each sequence's last-page padding (token >= seq_len) with NaN vs with 0 and
-    require BIT-IDENTICAL kernel output. Catches stale/garbage V leaking into the PV
-    WMMA. Exits non-zero if any config mismatches. Use ctx_len values that are NOT a
-    multiple of 256 so a padding region exists, e.g. -c 7 100 260 777 4097.""",
-)
-args = parser.parse_args()
-
-# An explicit context_lens vector defines a single shape: batch = its length, the
-# kv_lens are the exact values. Collapse the -b/-c sweep to that one config (kv_head
-# / mtp are still swept) and pass the vector through.
-batch_sizes = [len(args.context_lens)] if args.context_lens else args.batch_size
-ctx_lens = [max(args.context_lens)] if args.context_lens else args.ctx_len
-
-if args.vmask:
-    # V-mask bit-match sweep: NaN-padded V vs zero-padded V must match bit-for-bit.
-    import sys
-
-    df = []
-    for batch, kv_head_num, ctx_len, mtp in itertools.product(
-        batch_sizes, args.kv_head_num, ctx_lens, args.mtp
-    ):
-        ret = test_pa_decode_vmask(
-            batch,
-            kv_head_num,
-            ctx_len,
-            mtp,
-            tuple(args.scales) if args.scales is not None else None,
-            args.varlen,
-            args.context_lens,
-        )
-        df.append(ret)
-    df = pd.DataFrame(df)
-    df_md = df.to_markdown(index=False)
-    aiter.logger.info("pa_decode_bf16_asm V-mask summary (markdown):\n%s", df_md)
-    df.to_csv("pa_decode_bf16_asm_vmask.csv")
-    n_race = int(df["nondeterministic"].sum())
-    n_fail = int((~df["bitmatch"]).sum())
-    if n_race:
-        aiter.logger.error(
-            "V-mask test INCONCLUSIVE: %d/%d configs NONDETERMINISTIC — two identical "
-            "zero-V runs differ in split_o or FINAL output (det_split_o/det_final>0). "
-            "That is a real GPU race (NOT the harmless uninit out_raw). Fix it first.",
-            n_race,
-            len(df),
-        )
-        sys.exit(2)
-    if n_fail:
-        aiter.logger.error(
-            "V-mask test FAILED: %d/%d configs — NaN-V vs zero-V diverged or held NaN "
-            "in split_o/FINAL, i.e. stale padding V leaked into the PV WMMA.",
-            n_fail,
-            len(df),
-        )
-        sys.exit(1)
-    aiter.logger.info(
-        "V-mask test PASSED: all %d configs — kernel deterministic, split_o & FINAL "
-        "bit-match between NaN-V and zero-V, no NaN. (det_out_raw is uninitialized "
-        "direct-O scratch for split rows; cpu_reduce overwrites it — harmless.)",
-        len(df),
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.RawTextHelpFormatter,
+        description="config input of pa_decode_bf16_asm test",
     )
-else:
-    df = []
-    for batch, kv_head_num, ctx_len, mtp in itertools.product(
-        batch_sizes, args.kv_head_num, ctx_lens, args.mtp
-    ):
-        ret = test_pa_decode(
-            batch,
-            kv_head_num,
-            ctx_len,
-            mtp,
-            tuple(args.scales) if args.scales is not None else None,
-            args.varlen,
-            args.sink,
-            args.context_lens,
+    parser.add_argument(
+        "-b",
+        "--batch_size",
+        type=int,
+        nargs="*",
+        default=[1, 3, 8, 64],
+        help="""Batch size.
+        e.g. -b 1 3 8 64""",
+    )
+    parser.add_argument(
+        "-kvh",
+        "--kv_head_num",
+        type=int,
+        nargs="*",
+        default=[1, 8],
+        help="""Number of KV heads (q heads = kv_head_num * gqa(8)).
+        e.g. -kvh 1 8""",
+    )
+    parser.add_argument(
+        "-c",
+        "--ctx_len",
+        type=int,
+        nargs="*",
+        default=[7, 256, 1024, 4097, 16384],
+        help="""Context length (arbitrary; multi-page when > 256).
+        e.g. -c 256 4097""",
+    )
+    parser.add_argument(
+        "-m",
+        "--mtp",
+        type=int,
+        nargs="*",
+        default=[0],
+        help="""Multi-token-predict layers (qlen = mtp+1). Kernel requires mtp < 4.
+        e.g. -m 0 1 2 3""",
+    )
+    parser.add_argument(
+        "--varlen",
+        action="store_true",
+        help="""Variable kv seqlens per batch (random in [1, ctx_len]). Default: False.""",
+    )
+    parser.add_argument(
+        "--scales",
+        type=float,
+        nargs=3,
+        default=None,
+        metavar=("Q", "K", "V"),
+        help="""Per-tensor q/k/v dequant scales by hand, e.g. --scales 0.5 2.0 1.5.
+        Default: random scales per config.""",
+    )
+    parser.add_argument(
+        "--sink",
+        action="store_true",
+        help="""Enable GPT-OSS attention sink: random per-Q-head sink logits passed to
+        the kernel + matching sink term in the reference. Requires the sink-enabled
+        kernel binary; with the current .co the kernel ignores it and this fails.""",
+    )
+    parser.add_argument(
+        "--context_lens",
+        type=int,
+        nargs="*",
+        default=None,
+        help="""Explicit per-sequence context lengths for ONE shape (e.g. a context_lens
+        tensor dumped from a production run). batch = number of values given; overrides
+        -b/-c/--varlen. e.g. --context_lens 462 549 670 520 ...""",
+    )
+    parser.add_argument(
+        "--vmask",
+        action="store_true",
+        help="""Run the V-mask NaN-vs-zero bit-match test instead of the accuracy test:
+        fill each sequence's last-page padding (token >= seq_len) with NaN vs with 0 and
+        require BIT-IDENTICAL kernel output. Catches stale/garbage V leaking into the PV
+        WMMA. Exits non-zero if any config mismatches. Use ctx_len values that are NOT a
+        multiple of 256 so a padding region exists, e.g. -c 7 100 260 777 4097.""",
+    )
+    args = parser.parse_args()
+
+    # An explicit context_lens vector defines a single shape: batch = its length, the
+    # kv_lens are the exact values. Collapse the -b/-c sweep to that one config (kv_head
+    # / mtp are still swept) and pass the vector through.
+    batch_sizes = [len(args.context_lens)] if args.context_lens else args.batch_size
+    ctx_lens = [max(args.context_lens)] if args.context_lens else args.ctx_len
+
+    if args.vmask:
+        # V-mask bit-match sweep: NaN-padded V vs zero-padded V must match bit-for-bit.
+        import sys
+
+        df = []
+        for batch, kv_head_num, ctx_len, mtp in itertools.product(
+            batch_sizes, args.kv_head_num, ctx_lens, args.mtp
+        ):
+            ret = test_pa_decode_vmask(
+                batch,
+                kv_head_num,
+                ctx_len,
+                mtp,
+                tuple(args.scales) if args.scales is not None else None,
+                args.varlen,
+                args.context_lens,
+            )
+            df.append(ret)
+        df = pd.DataFrame(df)
+        df_md = df.to_markdown(index=False)
+        aiter.logger.info("pa_decode_bf16_asm V-mask summary (markdown):\n%s", df_md)
+        df.to_csv("pa_decode_bf16_asm_vmask.csv")
+        n_race = int(df["nondeterministic"].sum())
+        n_fail = int((~df["bitmatch"]).sum())
+        if n_race:
+            aiter.logger.error(
+                "V-mask test INCONCLUSIVE: %d/%d configs NONDETERMINISTIC — two identical "
+                "zero-V runs differ in split_o or FINAL output (det_split_o/det_final>0). "
+                "That is a real GPU race (NOT the harmless uninit out_raw). Fix it first.",
+                n_race,
+                len(df),
+            )
+            sys.exit(2)
+        if n_fail:
+            aiter.logger.error(
+                "V-mask test FAILED: %d/%d configs — NaN-V vs zero-V diverged or held NaN "
+                "in split_o/FINAL, i.e. stale padding V leaked into the PV WMMA.",
+                n_fail,
+                len(df),
+            )
+            sys.exit(1)
+        aiter.logger.info(
+            "V-mask test PASSED: all %d configs — kernel deterministic, split_o & FINAL "
+            "bit-match between NaN-V and zero-V, no NaN. (det_out_raw is uninitialized "
+            "direct-O scratch for split rows; cpu_reduce overwrites it — harmless.)",
+            len(df),
         )
-        df.append(ret)
-    df = pd.DataFrame(df)
-    df_md = df.to_markdown(index=False)
-    aiter.logger.info("pa_decode_bf16_asm summary (markdown):\n%s", df_md)
-    df.to_csv("pa_decode_bf16_asm.csv")
+    else:
+        df = []
+        for batch, kv_head_num, ctx_len, mtp in itertools.product(
+            batch_sizes, args.kv_head_num, ctx_lens, args.mtp
+        ):
+            ret = test_pa_decode(
+                batch,
+                kv_head_num,
+                ctx_len,
+                mtp,
+                tuple(args.scales) if args.scales is not None else None,
+                args.varlen,
+                args.sink,
+                args.context_lens,
+            )
+            df.append(ret)
+        df = pd.DataFrame(df)
+        df_md = df.to_markdown(index=False)
+        aiter.logger.info("pa_decode_bf16_asm summary (markdown):\n%s", df_md)
+        df.to_csv("pa_decode_bf16_asm.csv")
