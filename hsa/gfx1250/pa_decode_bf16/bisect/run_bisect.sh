@@ -15,7 +15,7 @@
 # IMPORTANT: TEST must be the SMALL-BATCH config that crashes (batch<32).
 
 set -u
-BISECT_DIR="$(cd "$(dirname "$0")" && pwd)/bisect"
+BISECT_DIR="$(cd "$(dirname "$0")" && pwd)/"
 DEPLOY="${DEPLOY:?set DEPLOY to the .co path the test actually loads (see the aiter LoadKernel log line)}"
 TEST="${TEST:?set TEST to the failing small-batch test command}"
 
