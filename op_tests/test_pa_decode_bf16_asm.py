@@ -30,6 +30,7 @@ import torch
 
 import aiter
 from aiter import dtypes
+from aiter.ops.attention import _pa_decode_bf16_asm as _pa_decode_bf16_asm_raw
 from aiter.test_common import benchmark, checkAllclose, perftest
 
 current_gfx = aiter.get_gfx()
@@ -389,39 +390,42 @@ def run_pa_stage(
     kv_indptr,
     gqa,
     mtp,
-    query_scale,
-    key_scale,
-    value_scale,
+    q_scale,
+    k_scale,
+    v_scale,
     qo_indptr,
     work_indptr,
     work_info,
     split_o,
     split_lse,
     sink,
+    out,
 ):
-    # PA stage: direct-to-O for non-split work items, partials -> split_o/split_lse
-    # for split (multi-page) ones (merged on host by cpu_reduce).  sink=None ->
-    # wrapper fills a -inf no-op buffer (kernel always reads the sink slot).
-    return aiter.pa_decode_bf16_asm(
+    # All buffers (out, sink, scale tensors) are pre-allocated by the caller so
+    # that torch.empty / torch.tensor / .to() overhead stays outside the timing.
+    _pa_decode_bf16_asm_raw(
         Q,
         K,
         V,
         kv_indices,
         context_lens,
         softmax_scale,
+        q_scale,
+        k_scale,
+        v_scale,
+        out,
+        qo_indptr,
         kv_indptr,
-        gqa=gqa,
-        mtp=mtp,
-        query_scale=query_scale,
-        key_scale=key_scale,
-        value_scale=value_scale,
-        qo_indptr=qo_indptr,
-        work_indptr=work_indptr,
-        work_info=work_info,
-        split_o=split_o,
-        split_lse=split_lse,
-        sink=sink,
+        work_indptr,
+        work_info,
+        split_o,
+        split_lse,
+        sink,
+        gqa,
+        mtp,
+        None,
     )
+    return out
 
 
 @benchmark()
@@ -550,6 +554,13 @@ def test_pa_decode(
     else:
         sink = torch.full((q_head_num,), -1.0e30, dtype=dtypes.fp32, device=device)
 
+    # Pre-allocate output and scale tensors so these don't pollute perftest timing.
+    out = torch.empty(Q.shape, dtype=torch.bfloat16, device=device)
+    q_scale_t = torch.tensor([query_scale], dtype=torch.float32, device=device)
+    k_scale_t = torch.tensor([key_scale], dtype=torch.float32, device=device)
+    v_scale_t = torch.tensor([value_scale], dtype=torch.float32, device=device)
+    # sink is already float32 and contiguous.
+
     out, us = run_pa_stage(
         Q,
         K,
@@ -560,15 +571,16 @@ def test_pa_decode(
         kv_indptr,
         gqa,
         mtp,
-        query_scale,
-        key_scale,
-        value_scale,
+        q_scale_t,
+        k_scale_t,
+        v_scale_t,
         qo_indptr,
         work_indptr,
         work_info,
         split_o,
         split_lse,
         sink,
+        out,
     )
     torch.cuda.synchronize()
     out = cpu_reduce(
