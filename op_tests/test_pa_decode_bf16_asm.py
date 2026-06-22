@@ -378,7 +378,7 @@ def ref_pa_decode(
     return out.to(torch.bfloat16)
 
 
-@perftest(num_rotate_args=20, use_cuda_event=True)
+@perftest(num_rotate_args=20)
 def run_pa_stage(
     Q,
     K,
@@ -558,7 +558,8 @@ def test_pa_decode(
     v_scale_t = torch.tensor([value_scale], dtype=torch.float32, device=device)
     # sink is already float32 and contiguous.
 
-    out, us = run_pa_stage(
+    # run_pa_stage: correctness + rough timing via profiler (dispatch-to-completion).
+    out, _us_profiler = run_pa_stage(
         Q,
         K,
         V,
@@ -579,6 +580,31 @@ def test_pa_decode(
         split_o,
         split_lse,
     )
+
+    # Accurate GPU-only timing via CUDA Graph + GPU events.
+    # Graph capture records only hipModuleLaunchKernel (not Python/ctypes overhead).
+    # N replays between one pair of GPU HW timestamps eliminates per-replay overhead.
+    # Falls back to profiler timing if graph capture fails (e.g. driver limitation).
+    try:
+        _g = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(_g):
+            aiter.pa_decode_bf16_asm(
+                Q, K, V, kv_indices, seq_lens_kv, softmax_scale, kv_indptr,
+                gqa, mtp, q_scale_t, k_scale_t, v_scale_t, out, sink,
+                qo_indptr=qo_indptr, work_indptr=work_indptr, work_info=work_info,
+                split_o=split_o, split_lse=split_lse,
+            )
+        _N = 200
+        _ev_s = torch.cuda.Event(enable_timing=True)
+        _ev_e = torch.cuda.Event(enable_timing=True)
+        _ev_s.record()
+        for _ in range(_N):
+            _g.replay()
+        _ev_e.record()
+        _ev_e.synchronize()
+        us = _ev_s.elapsed_time(_ev_e) * 1000 / _N  # ms → μs, average per kernel
+    except Exception:
+        us = _us_profiler
     torch.cuda.synchronize()
     out = cpu_reduce(
         out,
