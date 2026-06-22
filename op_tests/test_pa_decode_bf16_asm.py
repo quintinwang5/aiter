@@ -378,7 +378,7 @@ def ref_pa_decode(
     return out.to(torch.bfloat16)
 
 
-@perftest(num_rotate_args=1)
+@perftest(num_rotate_args=20, use_cuda_event=True)
 def run_pa_stage(
     Q,
     K,

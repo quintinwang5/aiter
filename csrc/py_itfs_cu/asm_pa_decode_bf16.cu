@@ -11,8 +11,8 @@
 //   * Per-tensor scalar dequant scales for Q/K/V (query_scale / key_scale /
 //     value_scale), passed as 1-element fp32 device tensors — NOT the
 //     per-token / per-block scale tensors used by asm_pa.cu.  The attention
-//     softmax scale (1/sqrt(d)) must be pre-folded into one of these scales by
-//     the caller (the kernel forms scl_log2e = query_scale*key_scale*log2e).
+//     softmax scale (1/sqrt(d)) is passed separately by value at kernarg 0x60;
+//     the kernel folds query_scale*key_scale*softmax_scale*log2(e) into scl_log2e.
 //   * Single thread-group per work item, 4 waves of 32 lanes → bdx = 128
 //     (wave32), launched persistently with grid.x = CU count.
 //   * GPT-OSS style attention sink: per-Q-head fp32 sink logits in the SCALED-
@@ -23,9 +23,13 @@
 // does only pointer + stride bookkeeping and kernel launch — no GPU memory
 // allocation, no torch dependency (mirrors asm_fmha_fwd_with_sink.cu).
 //
+// softmax_scale is passed BY VALUE at kernarg 0x60; the kernel folds
+// query_scale * key_scale * softmax_scale * log2(e) into scl_log2e internally.
+// The caller does NOT pre-fold softmax_scale into any of the dequant scales.
+//
 // Kernel argument block — 16-byte-slot padded ABI, 0x170 bytes total.  Offsets
 // must match the s_load_dword offsets in the SP3 main (see sched2/pa_ps.cpp
-// "Kernel argument layout").  softmax_scale is a by-value f32 kernarg at 0x60.
+// "Kernel argument layout").  softmax_scale is the by-value f32 at 0x60.
 #include "aiter_tensor.h"
 #include "aiter_ctypes_error.h"
 #include "aiter_hip_common.h"   // HipDeviceGuard, AiterAsmKernel, p2, p3, get_num_cu_func, ...
@@ -182,12 +186,24 @@ AITER_CTYPES_DEFINE_ENTRYPOINT_VOID(
     AITER_CHECK(gqa == PA_GQA_RATIO,
                 "pa_decode_bf16_asm: kernel requires gqa=", PA_GQA_RATIO, ", got ", gqa);
 
+    // V layout: [num_pages, kv_head, page_size/16, head_dim, 16] — check page_size
+    // via dim 2 (page_size/16) × dim 4 (16-element tile).
+    AITER_CHECK((int)(V->size(2) * V->size(4)) == PA_PAGE_SIZE,
+                "pa_decode_bf16_asm: kernel requires page_size=", PA_PAGE_SIZE,
+                ", got ", V->size(2) * V->size(4));
+
+    // work_indptr and work_info must be provided together or not at all.
+    AITER_CHECK((work_indptr == nullptr) == (work_info == nullptr),
+                "pa_decode_bf16_asm: work_indptr and work_info must both be non-null "
+                "or both null");
+
     // ---- strides (bytes) --------------------------------------------------
     const int elem_q = (int)Q->element_size();   // fp8 -> 1
     const int elem_k = (int)K->element_size();   // fp8 -> 1
 
-    // Q_mtp_stride: bytes per MTP layer = (kv_head*gqa) * head_dim * sizeof(QT).
-    const int stride_Q       = kv_head_num * gqa * head_dim * elem_q;
+    // Q_mtp_stride: bytes per MTP layer, taken from the tensor stride so non-
+    // contiguous Q (e.g. a slice) is handled correctly.
+    const int stride_Q       = (int)Q->stride(1) * elem_q;
     // Paged K/V: K[num_pages, kv_heads, head_dim/16, page, 16] (contiguous).
     const int stride_KV_blk  = (int)K->stride(0) * elem_k;
     const int stride_KV_head = (int)K->stride(1) * elem_k;

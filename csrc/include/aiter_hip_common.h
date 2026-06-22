@@ -176,7 +176,8 @@ namespace {
 class AiterAsmKernelFast
 {
     private:
-    void* module = nullptr;
+    void*         module      = nullptr;
+    hipFunction_t kernel_func = nullptr;   // cached at init; avoids per-launch lookup
 
     protected:
     AiterAsmKernelFast() = default;
@@ -196,13 +197,11 @@ class AiterAsmKernelFast
                                             nullptr,
                                             nullptr,
                                             nullptr);
-        // Verify registration succeeded. __hipRegisterFunction returns void so
-        // we probe via hipGetFuncBySymbol — if it returns null the runtime silently
-        // rejected the kernel (e.g. resource limits, arch mismatch). This runs
-        // once per kernel variant at init time, not on every launch.
-        hipFunction_t probe = nullptr;
-        (void)hipGetFuncBySymbol(&probe, reinterpret_cast<void*>(this));
-        AITER_CHECK(probe != nullptr,
+        // Resolve and cache the hipFunction_t once.  __hipRegisterFunction
+        // returns void so we probe here — a null result means the runtime
+        // silently rejected the kernel (arch mismatch, resource limit, etc.).
+        (void)hipGetFuncBySymbol(&kernel_func, reinterpret_cast<void*>(this));
+        AITER_CHECK(kernel_func != nullptr,
                     "kernel registration failed for '", kernel_name, "'.");
     }
 
@@ -221,16 +220,11 @@ class AiterAsmKernelFast
 
     void launch_kernel(const AiterAsmKernelArgs& kargs)
     {
-        void* config[]            = {HIP_LAUNCH_PARAM_BUFFER_POINTER,
-                                     kargs.args_ptr,
-                                     HIP_LAUNCH_PARAM_BUFFER_SIZE,
-                                     kargs.arg_size_ptr,
-                                     HIP_LAUNCH_PARAM_END};
-        hipFunction_t kernel_func = nullptr;
-        // TODO Ask runtime folks to provide an API for hipLaunchKernel with extra arg
-        // Don't error check here — registration is validated once in init().
-        (void)hipGetFuncBySymbol(&kernel_func, reinterpret_cast<void*>(this));
-
+        void* config[] = {HIP_LAUNCH_PARAM_BUFFER_POINTER,
+                          kargs.args_ptr,
+                          HIP_LAUNCH_PARAM_BUFFER_SIZE,
+                          kargs.arg_size_ptr,
+                          HIP_LAUNCH_PARAM_END};
         HIP_CALL_LAUNCH(hipModuleLaunchKernel(kernel_func,
                                        kargs.gdx,
                                        kargs.gdy,
@@ -384,28 +378,22 @@ class AiterAsmKernel: private AiterAsmKernelFast
 
 static const std::string get_gpu_arch()
 {
-    int device_count;
-    HIP_CALL(hipGetDeviceCount(&device_count));
-    if(device_count == 0)
-    {
-        return "No GPU Found";
-    }
+    static const std::string cached = []() {
+        int device_count;
+        HIP_CALL(hipGetDeviceCount(&device_count));
+        if(device_count == 0)
+            return std::string("No GPU Found");
 
-    hipDevice_t dev;
-    hipDeviceProp_t dev_prop;
-    HIP_CALL(hipGetDevice(&dev));
-    HIP_CALL(hipGetDeviceProperties(&dev_prop, dev));
+        hipDevice_t dev;
+        hipDeviceProp_t dev_prop;
+        HIP_CALL(hipGetDevice(&dev));
+        HIP_CALL(hipGetDeviceProperties(&dev_prop, dev));
 
-    std::string arch_full = dev_prop.gcnArchName;
-    size_t colon_pos      = arch_full.find(':');
-    if(colon_pos != std::string::npos)
-    {
-        return arch_full.substr(0, colon_pos);
-    }
-    else
-    {
-        return arch_full;
-    }
+        std::string arch_full = dev_prop.gcnArchName;
+        size_t colon_pos      = arch_full.find(':');
+        return (colon_pos != std::string::npos) ? arch_full.substr(0, colon_pos) : arch_full;
+    }();
+    return cached;
 }
 
 static inline bool is_fp8_ocp_arch()
