@@ -401,11 +401,10 @@ def pa_ps_fwd_asm(
 # in the SCALED-logit domain, exp(sink); kernel divides by s_eff internally) is
 # always read by the kernel.
 #
-# Memory-allocation policy: all GPU tensors are allocated on the Python side;
-# the C++ entry point performs only pointer + stride bookkeeping and the kernel
-# launch (no torch dependency).  The public wrapper `pa_decode_bf16_asm` below
-# handles output/scale/sink allocation and folds the attention softmax scale
-# into key_scale (matching the reference host file sched2/pa_ps.cpp).
+# All GPU tensors (out, sink, q/k/v scale) must be pre-allocated by the caller.
+# The public wrapper `pa_decode_bf16_asm` is a thin pass-through to the C++
+# entry point, which performs only pointer/stride bookkeeping and the kernel
+# launch (no torch dependency).
 # ---------------------------------------------------------------------------
 @compile_ops(
     "module_pa_decode_bf16_asm",
@@ -444,66 +443,31 @@ def pa_decode_bf16_asm(
     context_lens: torch.Tensor,
     softmax_scale: float,
     kv_indptr: torch.Tensor,
-    gqa: int = 8,
-    mtp: int = 0,
-    query_scale: float = 1.0,
-    key_scale: float = 1.0,
-    value_scale: float = 1.0,
+    gqa: int,
+    mtp: int,
+    q_scale: torch.Tensor,
+    k_scale: torch.Tensor,
+    v_scale: torch.Tensor,
+    out: torch.Tensor,
+    sink: torch.Tensor,
     qo_indptr: Optional[torch.Tensor] = None,
     work_indptr: Optional[torch.Tensor] = None,
     work_info: Optional[torch.Tensor] = None,
     split_o: Optional[torch.Tensor] = None,
     split_lse: Optional[torch.Tensor] = None,
-    sink: Optional[torch.Tensor] = None,
-    out: Optional[torch.Tensor] = None,
     kernelName: Optional[str] = None,
 ) -> torch.Tensor:
-    """Public wrapper for the gfx1250 PA decode kernel.
+    """Thin pass-through to the ctypes kernel binding.
 
-    Contract details:
-      * `Q`/`K`/`V` are FP8; `out` is bf16 with Q's logical shape.
-      * `query_scale`/`key_scale`/`value_scale` are the per-tensor FP8 dequant
-        scales; the attention `softmax_scale` (typically 1/sqrt(head_dim)) is
-        passed BY VALUE (kernarg 0x60) and the kernel forms
-        scl_log2e = query_scale * key_scale * softmax_scale * log2e.
-      * `sink` (optional) holds per-Q-head fp32 logits in the SCALED-logit
-        domain (exp(sink), Triton/GPT-OSS convention; the kernel divides by
-        s_eff internally), shape [kv_head_num * gqa].  The kernel always reads
-        this slot, so when `sink` is None a -inf buffer is allocated, making the
-        sink a numerical no-op.
+    All tensors must be pre-allocated and formatted by the caller:
+      * `out`              — bf16, same logical shape as Q.
+      * `sink`             — float32 [q_head_num], finite values; use -1e30 as
+                             a numerical no-op (NOT -inf, which causes NaN in
+                             the kernel's sink merge).
+      * `q_scale` / `k_scale` / `v_scale` — float32 1-element tensors.
+    `softmax_scale` is passed by value (kernarg 0x60); the kernel forms
+    scl_log2e = q_scale * k_scale * softmax_scale * log2e.
     """
-    device = Q.device
-    kv_head_num = K.shape[1]
-    q_head_num = kv_head_num * gqa
-
-    if out is None:
-        out = torch.empty(Q.shape, dtype=torch.bfloat16, device=device)
-
-    def _scale_tensor(scale: float | torch.Tensor, multiplier: float = 1.0):
-        if isinstance(scale, torch.Tensor):
-            scale = scale.to(device=device, dtype=torch.float32).reshape(-1)[:1]
-            if multiplier != 1.0:
-                scale = scale * multiplier
-            return scale.contiguous()
-        return torch.tensor(
-            [float(scale) * multiplier], dtype=torch.float32, device=device
-        )
-
-    q_scale = _scale_tensor(query_scale)
-    # softmax_scale is passed BY VALUE (kernarg 0x60); the kernel applies it, so
-    # do NOT pre-fold it into key_scale.
-    k_scale = _scale_tensor(key_scale)
-    v_scale = _scale_tensor(value_scale)
-
-    if sink is None:
-        # The kernel is compiled sink-enabled (always reads + merges the sink
-        # slot), so default to a FINITE large-negative buffer (numerical no-op:
-        # exp2((sink-max)*scl) underflows to 0) rather than -inf, which can
-        # produce inf/NaN in the in-kernel sink merge.
-        sink = torch.full((q_head_num,), -1.0e30, dtype=torch.float32, device=device)
-    else:
-        sink = sink.to(torch.float32).contiguous()
-
     _pa_decode_bf16_asm(
         Q,
         K,

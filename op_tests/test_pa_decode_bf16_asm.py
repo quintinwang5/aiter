@@ -30,7 +30,6 @@ import torch
 
 import aiter
 from aiter import dtypes
-from aiter.ops.attention import _pa_decode_bf16_asm as _pa_decode_bf16_asm_raw
 from aiter.test_common import benchmark, checkAllclose, perftest
 
 current_gfx = aiter.get_gfx()
@@ -393,39 +392,37 @@ def run_pa_stage(
     q_scale,
     k_scale,
     v_scale,
+    out,
+    sink,
     qo_indptr,
     work_indptr,
     work_info,
     split_o,
     split_lse,
-    sink,
-    out,
 ):
-    # All buffers (out, sink, scale tensors) are pre-allocated by the caller so
-    # that torch.empty / torch.tensor / .to() overhead stays outside the timing.
-    _pa_decode_bf16_asm_raw(
+    # All buffers pre-allocated by the caller; pa_decode_bf16_asm is a thin
+    # pass-through with no internal tensor allocations.
+    return aiter.pa_decode_bf16_asm(
         Q,
         K,
         V,
         kv_indices,
         context_lens,
         softmax_scale,
+        kv_indptr,
+        gqa,
+        mtp,
         q_scale,
         k_scale,
         v_scale,
         out,
-        qo_indptr,
-        kv_indptr,
-        work_indptr,
-        work_info,
-        split_o,
-        split_lse,
         sink,
-        gqa,
-        mtp,
-        None,
+        qo_indptr=qo_indptr,
+        work_indptr=work_indptr,
+        work_info=work_info,
+        split_o=split_o,
+        split_lse=split_lse,
     )
-    return out
 
 
 @benchmark()
@@ -574,13 +571,13 @@ def test_pa_decode(
         q_scale_t,
         k_scale_t,
         v_scale_t,
+        out,
+        sink,
         qo_indptr,
         work_indptr,
         work_info,
         split_o,
         split_lse,
-        sink,
-        out,
     )
     torch.cuda.synchronize()
     out = cpu_reduce(
@@ -811,7 +808,11 @@ def _run_pa_kernel(inp, V):
         dtype=dtypes.fp32,
         device="cuda",
     )
-    out = aiter.pa_decode_bf16_asm(
+    out = torch.empty(inp["Q"].shape, dtype=torch.bfloat16, device="cuda")
+    q_scale = torch.tensor([inp["query_scale"]], dtype=torch.float32, device="cuda")
+    k_scale = torch.tensor([inp["key_scale"]], dtype=torch.float32, device="cuda")
+    v_scale = torch.tensor([inp["value_scale"]], dtype=torch.float32, device="cuda")
+    aiter.pa_decode_bf16_asm(
         inp["Q"],
         inp["K"],
         V,
@@ -819,17 +820,18 @@ def _run_pa_kernel(inp, V):
         inp["seq_lens_kv"],
         inp["softmax_scale"],
         inp["kv_indptr"],
-        gqa=inp["gqa"],
-        mtp=inp["mtp"],
-        query_scale=inp["query_scale"],
-        key_scale=inp["key_scale"],
-        value_scale=inp["value_scale"],
+        inp["gqa"],
+        inp["mtp"],
+        q_scale,
+        k_scale,
+        v_scale,
+        out,
+        inp["sink"],
         qo_indptr=inp["qo_indptr"],
         work_indptr=inp["work_indptr"],
         work_info=inp["work_info"],
         split_o=split_o,
         split_lse=split_lse,
-        sink=inp["sink"],
     )
     torch.cuda.synchronize()
     return out.clone(), split_o.clone(), split_lse.clone()
