@@ -100,6 +100,7 @@ def make_sched2_metadata(
     available_tgs,
     device,
     is_causal=True,
+    tile_q=None,
 ):
     """Python port of sched2 common_ps.h generate_metadata + generate_reduce_info
     (the convention the SP3 PA_DECODE kernel was authored against).
@@ -109,14 +110,20 @@ def make_sched2_metadata(
     single TG uses partial_o_loc=-1 (direct-to-O); split tiles emit partials + a
     reduce group.  Returns (work_indptr, work_info, reduce_indptr,
     reduce_final_map, reduce_partial_map, split_rows).
+
+    tile_q: Q heads per work item.  Must equal the kernel's TileQ constant (default gqa
+    = 1 kv_head per WI).  For PA_DECODE_D64_1TG_4W_PS (4 waves, 1 kv_head per wave)
+    pass tile_q=PA_TILE_Q=32 so each WI covers 4 kv_heads and the main loop runs
+    q_head_num/tile_q times per TG instead of kv_head_num times.
     """
-    qhead_granularity = gqa
+    tile_q = tile_q if tile_q is not None else gqa
+    qhead_granularity = tile_q
     kvlen_granularity = block_size
     blocks_per_unit = kvlen_granularity // block_size
     qo = qo_indptr.tolist()
     kvp = kv_indptr.tolist()
     ctx = context_lens.tolist()
-    num_head_k = kv_head_num
+    num_head_k = kv_head_num * gqa // tile_q  # kv_head groups per TG pass
 
     # Step 1: query tiles (one work = one Q-tile x one q-head).
     qtiles = []  # [batch_idx, qo_start, qo_end, num_blocks, effective_kv_len]
@@ -533,6 +540,7 @@ def test_pa_decode(
         qlen_with_mtp,
         num_cu,
         device,
+        tile_q=PA_TILE_Q,
     )
     # -inf lse / 0 o so any split the kernel leaves unwritten is inert in reduce.
     split_o = torch.zeros(
@@ -764,6 +772,7 @@ def _build_pa_inputs(
         qlen_with_mtp,
         num_cu,
         device,
+        tile_q=PA_TILE_Q,
     )
     sink = torch.full((q_head_num,), -1.0e30, dtype=dtypes.fp32, device=device)
 
