@@ -488,16 +488,6 @@ def pa_decode_bf16_asm(
     else:
         sink = sink.to(torch.float32).contiguous()
 
-    import sys as _sys
-    for _n, _t in [('Q', Q), ('K', K), ('V', V), ('kv_indices', kv_indices),
-                   ('ctxlen', context_lens), ('out', out), ('kv_indptr', kv_indptr),
-                   ('work_indptr', work_indptr), ('work_info', work_info),
-                   ('split_o', split_o), ('split_lse', split_lse), ('sink', sink)]:
-        if _t is not None:
-            _a = _t.data_ptr(); _b = _a + _t.numel() * _t.element_size()
-            print(f"BUFADDR {_n:12s} 0x{_a:012x} .. 0x{_b:012x}  ({_b - _a} B)",
-                  file=_sys.stderr, flush=True)
-
     _pa_decode_bf16_asm(
         Q,
         K,

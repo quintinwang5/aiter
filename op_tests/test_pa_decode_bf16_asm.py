@@ -101,7 +101,9 @@ def make_sched2_metadata(
     device,
     is_causal=True,
 ):
-    """Python port of sched2 common_ps.h generate_metadata + generate_reduce_info
+    """[LEGACY — use build_pa_metadata() instead.]
+
+    Python port of sched2 common_ps.h generate_metadata + generate_reduce_info
     (the convention the SP3 PA_DECODE kernel was authored against).
 
     work_info = 8-dword WORK_INFO: [batch_idx, partial_o_loc, qo_start, qo_end,
@@ -221,7 +223,9 @@ def make_sched2_metadata(
 def cpu_reduce(
     out, split_o, split_lse, reduce_indptr, reduce_final_map, reduce_partial_map, gqa
 ):
-    """Host reduce (matches aiter csrc/kernels/mla/reduce.cu, natural log):
+    """[LEGACY — pairs with make_sched2_metadata; use cpu_reduce_v1() instead.]
+
+    Host reduce (matches aiter csrc/kernels/mla/reduce.cu, natural log):
         global_lse = max_lse + log(sum exp(lse - max_lse))
         out        = sum_p partial_o_p * exp(lse_p - global_lse)
     partial_lse layout [row, head]; partial_output [row, head, dv]; row = loc+local_seq.
@@ -260,6 +264,112 @@ def cpu_reduce(
             finite = torch.isfinite(m).unsqueeze(-1)
             o = torch.where(finite, o, torch.zeros_like(o))
             out_flat[seq_id] = o.to(out_flat.dtype)
+    return out
+
+
+def build_pa_metadata(batch, kv_head_num, gqa, qo_indptr, kv_indptr, context_lens,
+                      page_size, qlen_with_mtp, device):
+    """Build persistent-scheduling metadata via aiter.get_pa_metadata_v1() (GPU kernel).
+
+    Mirrors ATOM's AiterAttentionMetadataBuilder.set_aiter_persistent_worker_buffers().
+    The GPU kernel distributes work at (sequence, kv_head) granularity:
+      batch × kv_head_num units → 2 work items per TG for batch=64, kv_head=8 on 256 CUs.
+    Full sequences are kept intact (direct-to-O) when possible; splits only occur when
+    a sequence must span multiple TGs.  split_rows is sized from reduce_partial_map.
+    """
+    (
+        (wmp_size, wmp_dtype),
+        (wip_size, wip_dtype),
+        (wi_size, wi_dtype),
+        (ri_size, ri_dtype),
+        (rfm_size, rfm_dtype),
+        (rpm_size, rpm_dtype),
+    ) = aiter.get_pa_metadata_info_v1(batch, kv_head_num)
+
+    work_metadata_ptrs = torch.empty(wmp_size, dtype=wmp_dtype, device=device)
+    work_indptr        = torch.zeros(wip_size, dtype=wip_dtype, device=device)
+    work_info          = torch.zeros(wi_size,  dtype=wi_dtype,  device=device)
+    reduce_indptr      = torch.zeros(ri_size,  dtype=ri_dtype,  device=device)
+    reduce_final_map   = torch.zeros(rfm_size, dtype=rfm_dtype, device=device)
+    reduce_partial_map = torch.zeros(rpm_size, dtype=rpm_dtype, device=device)
+
+    aiter.get_pa_metadata_v1(
+        qo_indptr,
+        kv_indptr,
+        context_lens,
+        gqa,          # num_heads_per_head_k
+        kv_head_num,  # num_heads_k
+        True,         # is_causal
+        work_metadata_ptrs,
+        work_indptr,
+        work_info,
+        reduce_indptr,
+        reduce_final_map,
+        reduce_partial_map,
+        kv_granularity=page_size,
+        block_size=page_size,
+        max_seqlen_qo=qlen_with_mtp,
+        uni_seqlen_qo=qlen_with_mtp,
+        fast_mode=True,
+        max_split_per_batch=-1,
+    )
+    # split_rows: follow ATOM convention — partial map entries × qlen
+    split_rows = max(1, reduce_partial_map.numel() * qlen_with_mtp)
+    return (work_indptr, work_info, reduce_indptr, reduce_final_map,
+            reduce_partial_map, split_rows)
+
+
+def cpu_reduce_v1(out, split_o, split_lse, reduce_indptr, reduce_final_map,
+                  reduce_partial_map, qlen_with_mtp=1):
+    """CPU reduce compatible with aiter.get_pa_metadata_v1() metadata.
+
+    Matches the semantics of aiter.pa_reduce_v1() (mla_reduce_v1 kernel):
+      global_lse[h] = logsumexp over partials of split_lse[p*qlen+qi, 0, h, 0]
+      out[qo_start+qi, h, :] = sum_p split_o[p*qlen+qi, 0, h, :]
+                                * exp(split_lse[..., h] - global_lse[h])
+
+    Groups where reduce_indptr[g] == reduce_indptr[g+1] are direct-to-O
+    (the PA kernel already wrote the result to out); only split groups are merged.
+
+    split_o:           [split_rows, 1, q_head_num, head_dim]  fp32
+    split_lse:         [split_rows, 1, q_head_num, 1]         fp32
+    out:               any contiguous shape with batch*qlen*q_head_num*head_dim elems
+    reduce_indptr:     [num_groups+1] int32 — CSR pointer into reduce_partial_map
+    reduce_final_map:  [num_groups, 2] int32 — [qo_start, qo_end] per group
+    reduce_partial_map:[max_splits]   int32 — partial tile indices p
+    """
+    q_head_num = split_o.shape[2]
+    head_dim   = split_o.shape[3]
+
+    out_flat = out.reshape(-1, q_head_num, head_dim)          # [batch*qlen, q_head_num, head_dim]
+    so = split_o[:, 0, :, :].float()    # [split_rows, q_head_num, head_dim]
+    sl = split_lse[:, 0, :, 0].float()  # [split_rows, q_head_num]
+
+    rip = reduce_indptr.to(torch.int64).tolist()
+    rfm = reduce_final_map.to(torch.int64).reshape(-1, 2).tolist()
+    rpm = reduce_partial_map.to(torch.int64)
+
+    for g in range(len(rip) - 1):
+        s0, s1 = rip[g], rip[g + 1]
+        if s1 <= s0:
+            continue  # direct-to-O: kernel already wrote output, skip
+
+        qo_start, qo_end = rfm[g]
+        partial_tiles = rpm[s0:s1]   # tile indices p, shape [num_partials]
+
+        for qi in range(qo_end - qo_start):
+            rows  = partial_tiles * qlen_with_mtp + qi   # row in split buffers
+            lses  = sl[rows]            # [num_partials, q_head_num]
+            m     = lses.max(dim=0).values               # [q_head_num]
+            w     = torch.exp(lses - m).sum(dim=0)       # [q_head_num]
+            g_lse = m + torch.log(w)
+            scale = torch.exp(lses - g_lse)              # [num_partials, q_head_num]
+            o     = (so[rows] * scale.unsqueeze(-1)).sum(dim=0)  # [q_head_num, head_dim]
+
+            # Fully-masked rows (all splits have -inf LSE) → output 0
+            o = torch.where(torch.isfinite(m).unsqueeze(-1), o, torch.zeros_like(o))
+            out_flat[qo_start + qi] = o.to(out_flat.dtype)
+
     return out
 
 
@@ -512,8 +622,7 @@ def test_pa_decode(
         )
     ).to(fp8)
 
-    # ---- sched2-convention split-KV metadata + scratch (host reduce; gfx1250 reduce WIP) ----
-    num_cu = torch.cuda.get_device_properties(device).multi_processor_count
+    # ---- sched2-convention split-KV metadata + scratch (GPU get_pa_metadata_v1) ----
     (
         work_indptr,
         work_info,
@@ -521,7 +630,7 @@ def test_pa_decode(
         reduce_final_map,
         reduce_partial_map,
         split_rows,
-    ) = make_sched2_metadata(
+    ) = build_pa_metadata(
         batch,
         kv_head_num,
         gqa,
@@ -530,22 +639,8 @@ def test_pa_decode(
         seq_lens_kv,
         page_size,
         qlen_with_mtp,
-        num_cu,
         device,
     )
-    import sys as _sys
-    _wi = work_info.view(-1, 8) if work_info.numel() else work_info.view(0, 8)
-    if _wi.numel():
-        _wic = _wi.cpu()
-        _ploc = _wic[:, 1]
-        _qhr = _wic[:, 7]
-        _qhs = _qhr & 0xFFFF
-        print(f"META num_cu={num_cu} nwork={_wic.shape[0]} "
-              f"work_indptr[max]={int(work_indptr.max())} len_wi={_wic.shape[0]} "
-              f"ploc[min/max]={int(_ploc.min())}/{int(_ploc.max())} "
-              f"kv_start[max]={int(_wic[:,4].max())} kv_end[max]={int(_wic[:,5].max())} "
-              f"q_head_start[max]={int(_qhs.max())} kv_head[max]={int((_qhs>>3).max())} "
-              f"split_o_rows(buf)={split_o.numel()//(64*64)}", file=_sys.stderr, flush=True)
     # -inf lse / 0 o so any split the kernel leaves unwritten is inert in reduce.
     split_o = torch.zeros(
         (split_rows, 1, q_head_num, head_dim), dtype=dtypes.fp32, device=device
@@ -584,14 +679,14 @@ def test_pa_decode(
         sink,
     )
     torch.cuda.synchronize()
-    out = cpu_reduce(
+    out = cpu_reduce_v1(
         out,
         split_o,
         split_lse,
         reduce_indptr,
         reduce_final_map,
         reduce_partial_map,
-        gqa,
+        qlen_with_mtp,
     )
 
     ref = ref_pa_decode(
@@ -723,7 +818,6 @@ def _build_pa_inputs(
         )
     ).to(fp8)
 
-    num_cu = torch.cuda.get_device_properties(device).multi_processor_count
     (
         work_indptr,
         work_info,
@@ -731,7 +825,7 @@ def _build_pa_inputs(
         reduce_final_map,
         reduce_partial_map,
         split_rows,
-    ) = make_sched2_metadata(
+    ) = build_pa_metadata(
         batch,
         kv_head_num,
         gqa,
@@ -740,7 +834,6 @@ def _build_pa_inputs(
         seq_lens_kv,
         page_size,
         qlen_with_mtp,
-        num_cu,
         device,
     )
     sink = torch.full((q_head_num,), -1.0e30, dtype=dtypes.fp32, device=device)
@@ -892,14 +985,14 @@ def test_pa_decode_vmask(
     REPS = 10  # intermittent race -> need enough reps to detect reliably
 
     def rd(o, so, sl):
-        return cpu_reduce(
+        return cpu_reduce_v1(
             o.clone(),
             so,
             sl,
             inp["reduce_indptr"],
             inp["reduce_final_map"],
             inp["reduce_partial_map"],
-            inp["gqa"],
+            inp["mtp"] + 1,
         )
 
     def run_reps(V):
