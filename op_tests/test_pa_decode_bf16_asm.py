@@ -533,6 +533,19 @@ def test_pa_decode(
         num_cu,
         device,
     )
+    import sys as _sys
+    _wi = work_info.view(-1, 8) if work_info.numel() else work_info.view(0, 8)
+    if _wi.numel():
+        _wic = _wi.cpu()
+        _ploc = _wic[:, 1]
+        _qhr = _wic[:, 7]
+        _qhs = _qhr & 0xFFFF
+        print(f"META num_cu={num_cu} nwork={_wic.shape[0]} "
+              f"work_indptr[max]={int(work_indptr.max())} len_wi={_wic.shape[0]} "
+              f"ploc[min/max]={int(_ploc.min())}/{int(_ploc.max())} "
+              f"kv_start[max]={int(_wic[:,4].max())} kv_end[max]={int(_wic[:,5].max())} "
+              f"q_head_start[max]={int(_qhs.max())} kv_head[max]={int((_qhs>>3).max())} "
+              f"split_o_rows(buf)={split_o.numel()//(64*64)}", file=_sys.stderr, flush=True)
     # -inf lse / 0 o so any split the kernel leaves unwritten is inert in reduce.
     split_o = torch.zeros(
         (split_rows, 1, q_head_num, head_dim), dtype=dtypes.fp32, device=device
