@@ -20,7 +20,7 @@ set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 DIR="$HERE/bisect_comment"
 
-DEPLOY="${DEPLOY:-/local_vol1_nobackup/qiwan/mi400_aiter/hsa/gfx1250/pa_decode_bf16/pa_decode_bf16_d64_page256_gqa8.co}"
+DEPLOY="${DEPLOY:-/local_vol1_nobackup/qiwan/mi400_aiter/hsa/gfx1250/pa_decode_bf16/pa_decode_bf16_d64_page256_gqa8_tq16.co}"
 AITER_ROOT="${AITER_ROOT:-/local_vol1_nobackup/qiwan/mi400_aiter}"
 TEST="${TEST:-cd $AITER_ROOT && ENABLE_CK=0 ENABLE_FLYDSL=0 AITER_REBUILD=0 \
   python3 op_tests/test_pa_decode_bf16_asm.py -b 1 -kvh 8 -c 1024 -m 0 --sink}"
@@ -28,7 +28,12 @@ TEST="${TEST:-cd $AITER_ROOT && ENABLE_CK=0 ENABLE_FLYDSL=0 AITER_REBUILD=0 \
 echo "DEPLOY = $DEPLOY"; echo "TEST = $TEST"
 [ -f "$DEPLOY" ] && cp -f "$DEPLOY" "${DEPLOY}.bak_cmt"
 echo "============================================================"
-for V in baseline q ktdm vtdm blocktable sink splitlse splito ostore; do
+# Order: baseline first, then broadest (decisive) -> narrower -> singles -> metadata.
+# If cmt_everything STILL faults, the fault is NOT global memory (LDS / scalar-arg
+# base / compute-MSB). Note: instruction prefetch is ALREADY off in baseline
+# (ENABLE_INST_PREFETCH=0) -> already ruled out.
+for V in baseline everything all_datamem all_meta0 all_loads all_stores kvtdm \
+         q ktdm vtdm blocktable sink splitlse splito ostore workinfo0 workidx0; do
   CO="$DIR/$([ "$V" = baseline ] && echo baseline || echo cmt_$V).co"
   [ -f "$CO" ] || { echo "$V: $CO missing"; continue; }
   cp -f "$CO" "$DEPLOY" || { echo "$V: cp to DEPLOY failed (perms?)"; exit 1; }

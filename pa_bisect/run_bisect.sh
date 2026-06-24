@@ -25,7 +25,7 @@ BISECT_DIR="$HERE/bisect"
 
 # The .co the test actually LoadKernel's (confirm against aiter's "hsaco:" log line).
 # The user runs from carhuang's aiter checkout (per session history + real fault addrs).
-DEPLOY="${DEPLOY:-/local_vol1_nobackup/qiwan/mi400_aiter/hsa/gfx1250/pa_decode_bf16/pa_decode_bf16_d64_page256_gqa8.co}"
+DEPLOY="${DEPLOY:-/local_vol1_nobackup/qiwan/mi400_aiter/hsa/gfx1250/pa_decode_bf16/pa_decode_bf16_d64_page256_gqa8_tq16.co}"
 
 # The failing batch=1 config. -c 1024 and 4096 both fault; 1024 is faster.
 # NOTE: the kernel is sink-enabled, so the test MUST pass a non-null sink. Add
