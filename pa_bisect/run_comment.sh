@@ -32,14 +32,19 @@ echo "============================================================"
 # If cmt_everything STILL faults, the fault is NOT global memory (LDS / scalar-arg
 # base / compute-MSB). Note: instruction prefetch is ALREADY off in baseline
 # (ENABLE_INST_PREFETCH=0) -> already ruled out.
-for V in baseline everything all_datamem all_meta0 all_loads all_stores kvtdm \
-         q ktdm vtdm blocktable sink splitlse splito ostore workinfo0 workidx0; do
+# single ops FIRST (they pin the op), then meta, then the hang-prone combos last.
+# Each run is wrapped in `timeout` so a HANG is recorded and the sweep continues.
+TMO="${TMO:-180}"
+for V in baseline q ktdm vtdm blocktable sink splitlse splito ostore \
+         workinfo0 workidx0 kvtdm all_loads all_stores all_meta0 all_datamem everything; do
   CO="$DIR/$([ "$V" = baseline ] && echo baseline || echo cmt_$V).co"
   [ -f "$CO" ] || { echo "$V: $CO missing"; continue; }
   cp -f "$CO" "$DEPLOY" || { echo "$V: cp to DEPLOY failed (perms?)"; exit 1; }
   LOG=/tmp/cmt_run_$V.log
-  eval "$TEST" >"$LOG" 2>&1; RC=$?
-  if grep -qiE "Memory access fault|page not present|HSA_STATUS_ERROR_MEMORY|core ?dump|Aborted|illegal" "$LOG"; then
+  timeout --signal=KILL "$TMO" bash -c "$TEST" >"$LOG" 2>&1; RC=$?
+  if [ $RC -eq 124 ] || [ $RC -eq 137 ]; then
+    R="HANG (>${TMO}s, killed)"
+  elif grep -qiE "Memory access fault|page not present|HSA_STATUS_ERROR_MEMORY|core ?dump|Aborted|illegal" "$LOG"; then
     R="FAULT"
   elif [ $RC -ne 0 ]; then R="exit=$RC (no fault str; see $LOG)"; else R="NO FAULT (completed)"; fi
   printf "%-12s : %s\n" "$V" "$R"
