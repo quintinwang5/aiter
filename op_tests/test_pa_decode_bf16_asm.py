@@ -21,6 +21,7 @@ LSE merge runs on host in cpu_reduce (which matches aiter csrc/kernels/mla/reduc
 
 import argparse
 import itertools
+import os
 import random
 import sys
 from typing import Optional, Tuple
@@ -982,7 +983,7 @@ def test_pa_decode_vmask(
     #       kernel is nondeterministic the vmask diff is dominated by the race.
     # `out` (direct-O) is torch.empty -> uninitialized for split rows, so we judge by
     # split_o (zero-init kernel partials) and the FINAL reduced output only.
-    REPS = 10  # intermittent race -> need enough reps to detect reliably
+    REPS = int(os.environ.get("PA_VMASK_REPS", "10"))  # intermittent race -> need enough reps to detect reliably
 
     def rd(o, so, sl):
         return cpu_reduce_v1(
