@@ -42,11 +42,15 @@ VGPR="${VGPR:-1024}"
 SGPR="${SGPR:-106}"
 SP3="${SP3:-/home/tingchen/sp3}"
 SP3_LIBDIR="${SP3_LIBDIR:-/home/tingchen}"
-# Use the poc_kl sp3cvt (NOT the csim one): its kernel_template.s sets the correct
-# gfx1250 descriptor (.amdhsa_wavefront_size32 1, WGP mode, system_vgpr_workitem_id 2,
-# inst_pref_size) that the csim template was missing -> that omission was what made
-# the kernel compute zeros.  It also auto-patches the 22-arg 0x160 ABI from pa_ps.cpp.
-SP3CVT="${SP3CVT:-/local_vol1_nobackup/qiwan/poc_kl/mi400/sp3cvt/sp3cvt.py}"
+# Local preload-capable sp3cvt copy (poc_kl base + --preload/--kernarg-size).
+# PRELOAD>0 emits .amdhsa_user_sgpr_kernarg_preload_length and sets kernarg_size
+# to the packed 0x98 ABI; PRELOAD=0 falls back to the legacy non-preload .co.
+# (The kernel .sp3 has USE_KARG_PRELOAD=1, so PRELOAD must be 30 to match it AND
+# PA_KARG_PRELOAD=1 in the aiter host. A non-preload .co with this kernel faults:
+# s2..s31 are never CP-loaded -> garbage pointers.)
+SP3CVT="${SP3CVT:-/local_vol1_nobackup/qiwan/mi400_aiter/pa_bisect/sp3cvt_preload.py}"
+# Packed preload kernarg ABI size in bytes (0x98). Used only when PRELOAD>0.
+KARG_BYTES="${KARG_BYTES:-152}"
 PA_PS_CPP="${PA_PS_CPP:-/local_vol1_nobackup/qiwan/sched2/pa_ps.cpp}"  # kernarg ABI source
 PYTHON="${PYTHON:-python3.10}"                           # sp3cvt needs py>=3.8 (shlex.join)
 # Local ROCm 7.2.4 LLVM (LLVM 22, has gfx1250) extracted from the rocm-llvm rpm;
@@ -67,9 +71,16 @@ stage1() {
     # ABI -> drop pa_ps.cpp in the work dir so the 22-arg 0x160 layout is parsed.
     cp -f "$PA_PS_CPP" "$WORK/pa_ps.cpp"
     rm -f "$S_OUT"   # force sp3cvt to start from its template, not a stale .s
+    PRELOAD_ARGS=""
+    if [ "${PRELOAD:-0}" -gt 0 ]; then
+        PRELOAD_ARGS="--preload $PRELOAD --kernarg-size $KARG_BYTES"
+        echo "   (HW kernarg preload ON: length=$PRELOAD dwords, kernarg_size=$KARG_BYTES)"
+    else
+        echo "   (HW kernarg preload OFF: legacy ABI)"
+    fi
     ( cd "$WORK" && LD_LIBRARY_PATH="$SP3_LIBDIR" "$PYTHON" "$SP3CVT" \
         -i "$WORK/${WORKBASE}.sp3" -n "$KERNEL_NAME" \
-        -lds "$LDS_BYTES" -v "$VGPR" -s "$SGPR" --sp3 "$SP3" )
+        -lds "$LDS_BYTES" -v "$VGPR" -s "$SGPR" --sp3 "$SP3" $PRELOAD_ARGS )
     echo "   wrote $S_OUT"
 }
 
