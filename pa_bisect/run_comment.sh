@@ -20,8 +20,8 @@ set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 DIR="$HERE/bisect_comment"
 
-DEPLOY="${DEPLOY:-/local_vol1_nobackup/qiwan/mi400_aiter/hsa/gfx1250/pa_decode_bf16/pa_decode_bf16_d64_page256_gqa8_tq16.co}"
-AITER_ROOT="${AITER_ROOT:-/local_vol1_nobackup/qiwan/mi400_aiter}"
+DEPLOY="${DEPLOY:-/home/carhuang/qiwan/aiter/hsa/gfx1250/pa_decode_bf16/pa_decode_bf16_d64_page256_gqa8_tq16.co}"
+AITER_ROOT="${AITER_ROOT:-/home/carhuang/qiwan/aiter}"
 TEST="${TEST:-cd $AITER_ROOT && ENABLE_CK=0 ENABLE_FLYDSL=0 AITER_REBUILD=0 \
   python3 op_tests/test_pa_decode_bf16_asm.py -b 1 -kvh 8 -c 1024 -m 0 --sink}"
 
