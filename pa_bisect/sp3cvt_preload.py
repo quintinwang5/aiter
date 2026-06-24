@@ -225,13 +225,20 @@ def _parse_args_set_arg(content: str) -> list[dict]:
     return args
 
 
-def _parse_args_packed_struct(content: str) -> list[dict]:
+def _parse_args_packed_struct(content: str, tight: bool = False) -> list[dict]:
     """Parse kernel args from packed struct with p2/p3 padding.
 
     Pattern:
         void *name;      p2 _padN;   -> pointer (8B), global_buffer, 16B slot
         unsigned int name; p3 _padN;  -> scalar (4B), by_value, 16B slot
     Access is determined by hipMemcpy(..., hipMemcpyDeviceToHost) calls.
+
+    tight=True (HW kernarg preload ABI): the struct is NATURALLY aligned (no
+    p2/p3 16-byte slots). Each field advances the offset by its REAL size
+    (ptr=8, scalar=4) with natural alignment, and explicit `unsigned int _padN`
+    pad members ADVANCE the offset (4B each) even though they are not emitted as
+    args. This yields packed offsets (0,8,10,...) matching the s2..s31 preload
+    mapping; tight=False keeps the legacy fixed-16B-slot behavior.
     """
     # Find the anonymous args struct block.
     # Handles plain `struct {` and `struct __attribute__((packed)) {`
@@ -273,10 +280,28 @@ def _parse_args_packed_struct(content: str) -> list[dict]:
         if not fm:
             continue
         name = fm.group(1)
-        if name.startswith('_p'):  # skip padding fields like _p0, _pad0
+        is_pad = name.startswith('_p')
+        is_ptr = bool(type_pat.search(line))
+
+        if tight:
+            # natural-aligned packing; pads advance the offset but emit nothing
+            size = 8 if is_ptr else 4
+            offset = (offset + size - 1) // size * size  # align to field size
+            if not is_pad:
+                if is_ptr:
+                    buf_var = field_to_buf.get(name, '')
+                    access = 'read_write' if buf_var in readback_bufs else 'read_only'
+                    args.append({'name': name, 'size': 8, 'offset': offset,
+                                 'kind': 'global_buffer', 'access': access})
+                else:
+                    args.append({'name': name, 'size': 4, 'offset': offset,
+                                 'kind': 'by_value', 'access': None})
+            offset += size
             continue
 
-        is_ptr = bool(type_pat.search(line))
+        # legacy: fixed 16-byte slots, pads skipped entirely
+        if is_pad:
+            continue
         if is_ptr:
             buf_var = field_to_buf.get(name, '')
             access = 'read_write' if buf_var in readback_bufs else 'read_only'
@@ -312,18 +337,19 @@ def _parse_workgroup_size(content: str) -> int | None:
     return dims.get('bdx', 1) * dims.get('bdy', 1) * dims.get('bdz', 1)
 
 
-def parse_kernel_args_from_cpp(cpp_path: Path) -> list[dict]:
+def parse_kernel_args_from_cpp(cpp_path: Path, tight: bool = False) -> list[dict]:
     """Parse kernel args from C++ host code.
 
     Supports two patterns:
     1. CSIM-style set_arg() calls (MEM/NONE_MEM)
     2. Silicon-style packed struct with p2/p3 padding
+    tight: HW kernarg-preload ABI (naturally-aligned struct, real member sizes).
     """
     content = cpp_path.read_text(encoding="utf-8", errors="replace")
 
     args = _parse_args_set_arg(content)
     if not args:
-        args = _parse_args_packed_struct(content)
+        args = _parse_args_packed_struct(content, tight=tight)
 
     return args
 
@@ -335,6 +361,9 @@ def apply_kernarg_preload(s_path: Path, preload_len: int, kernarg_size: int) -> 
       the first `preload_len` kernarg DWORDS into SGPRs after the kernarg segment
       ptr (s0:1) -> s2 .. s(1+preload_len).
     - Bumps .amdhsa_user_sgpr_count to 2 + preload_len (segment_ptr + preloaded).
+      On gfx12 COMPUTE_PGM_RSRC2.USER_SGPR_COUNT is bits[6:1] (6 bits, max 63),
+      so 32 encodes correctly (0x11c0 -> (>>1)&0x3f = 32). The preloaded kernarg
+      SGPRs land at s2..s(1+preload_len) right after the kernarg segment ptr.
     - Optionally overrides .amdhsa_kernarg_size / .kernarg_segment_size to the
       packed preload ABI size (e.g. 152 = 0x98), since the .cpp parser may have
       computed the legacy 16-byte-slot size.
@@ -351,7 +380,8 @@ def apply_kernarg_preload(s_path: Path, preload_len: int, kernarg_size: int) -> 
             lambda m: m.group(1) + str(kernarg_size),
             text, flags=re.MULTILINE)
 
-    # segment_ptr (2 SGPRs) + preloaded dwords
+    # segment_ptr (2 SGPRs) + preloaded dwords. USER_SGPR_COUNT is bits[6:1] on
+    # gfx12 (max 63), so 32 is valid.
     text = re.sub(
         r'(^[\t ]*\.amdhsa_user_sgpr_count\s+)\d+',
         lambda m: m.group(1) + str(2 + preload_len),
@@ -371,12 +401,13 @@ def apply_kernarg_preload(s_path: Path, preload_len: int, kernarg_size: int) -> 
           f"user_sgpr_count={2 + preload_len} ---", flush=True)
 
 
-def patch_kernel_args(s_path: Path, cpp_path: Path) -> bool:
+def patch_kernel_args(s_path: Path, cpp_path: Path, tight: bool = False) -> bool:
     """Update .args, .amdhsa_kernarg_size, .kernarg_segment_size,
     and .max_flat_workgroup_size in kernel.s based on C++ host code.
-    Returns True if args were successfully patched."""
+    Returns True if args were successfully patched.
+    tight: HW kernarg-preload ABI (naturally-aligned, real member sizes)."""
     content = cpp_path.read_text(encoding="utf-8", errors="replace")
-    args = parse_kernel_args_from_cpp(cpp_path)
+    args = parse_kernel_args_from_cpp(cpp_path, tight=tight)
     if not args:
         print(
             f"Warning: no kernel args parsed from {cpp_path.name}; skipping.",
@@ -384,9 +415,14 @@ def patch_kernel_args(s_path: Path, cpp_path: Path) -> bool:
         )
         return False
 
-    # kernarg_segment_size = last arg offset + 16 (aligned to 16-byte slots)
-    last_offset = max(a['offset'] for a in args)
-    kernarg_size = last_offset + 16
+    if tight:
+        # naturally-aligned: kernarg size = end of last field, rounded up to 8
+        end = max(a['offset'] + a['size'] for a in args)
+        kernarg_size = (end + 7) // 8 * 8
+    else:
+        # legacy: last arg offset + 16 (16-byte slots)
+        last_offset = max(a['offset'] for a in args)
+        kernarg_size = last_offset + 16
 
     # workgroup size from bdx * bdy * bdz
     wg_size = _parse_workgroup_size(content)
@@ -819,7 +855,7 @@ def main() -> None:
         cpp_path = find_cpp_file(sp3_src)
     if cpp_path and cpp_path.is_file():
         print(f"--- Patching kernel args from {cpp_path.name} ---", flush=True)
-        args_patched = patch_kernel_args(kernel_s_path, cpp_path)
+        args_patched = patch_kernel_args(kernel_s_path, cpp_path, tight=(args.preload > 0))
     else:
         print("Warning: no .cpp file found; skipping kernel args patch.", file=sys.stderr)
 

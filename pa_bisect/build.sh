@@ -48,7 +48,7 @@ SP3_LIBDIR="${SP3_LIBDIR:-/home/tingchen}"
 # (The kernel .sp3 has USE_KARG_PRELOAD=1, so PRELOAD must be 30 to match it AND
 # PA_KARG_PRELOAD=1 in the aiter host. A non-preload .co with this kernel faults:
 # s2..s31 are never CP-loaded -> garbage pointers.)
-SP3CVT="${SP3CVT:-/local_vol1_nobackup/qiwan/mi400_aiter/pa_bisect/sp3cvt_preload.py}"
+SP3CVT="${SP3CVT:-/local_vol1_nobackup/qiwan/sched2/pa_co_build/sp3cvt_preload.py}"
 # Packed preload kernarg ABI size in bytes (0x98). Used only when PRELOAD>0.
 KARG_BYTES="${KARG_BYTES:-152}"
 PA_PS_CPP="${PA_PS_CPP:-/local_vol1_nobackup/qiwan/sched2/pa_ps.cpp}"  # kernarg ABI source
