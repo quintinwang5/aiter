@@ -315,7 +315,7 @@ def build_pa_metadata(batch, kv_head_num, gqa, qo_indptr, kv_indptr, context_len
         # shape the kernel was HW-validated on. (Sequences not a multiple of 4 pages
         # still leave a <4-page remainder chunk; exact multiples like 1024/4096 are
         # fully covered.)
-        kv_granularity=4 * page_size,
+        kv_granularity=page_size,
         block_size=page_size,
         max_seqlen_qo=qlen_with_mtp,
         uni_seqlen_qo=qlen_with_mtp,
