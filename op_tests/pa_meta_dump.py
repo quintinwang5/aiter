@@ -78,5 +78,64 @@ def main():
             print(f"    [{i:3d}] {w[i].tolist()}")
 
 
+def dump_bin(batch, kvh, ctx, mtp, outdir):
+    """Write aiter get_pa_metadata_v1 output in the emu's binary format so it can
+    be substituted into the sim via META_DATA::load():
+
+      work_indptr.bin : raw uint32[]            (num_tg+1 entries)
+      work_info.bin   : raw WORK_INFO[]          (8x uint32 per work item)
+
+    WORK_INFO field order matches the emu struct exactly:
+      [batch_idx, partial_o_loc, qo_start, qo_end, kv_start, kv_end, kv_offset, q_head_range]
+    -1 (direct-O ploc) has identical 0xFFFFFFFF bytes in int32/uint32.
+    """
+    import os
+    import numpy as np
+
+    (wi_ptr, winfo, _rip, _rfm, _rpm, _split_rows), _kvi, _qoi = build_one(
+        batch, kvh, ctx, mtp
+    )
+    wi_ptr_np = wi_ptr.cpu().numpy().astype(np.uint32, copy=False)
+    winfo_np = (
+        winfo.view(-1, 8).cpu().numpy().astype(np.uint32, copy=False)
+        if winfo.numel()
+        else np.zeros((0, 8), dtype=np.uint32)
+    )
+    os.makedirs(outdir, exist_ok=True)
+    wi_path = os.path.join(outdir, "work_indptr.bin")
+    info_path = os.path.join(outdir, "work_info.bin")
+    wi_ptr_np.tofile(wi_path)
+    winfo_np.tofile(info_path)
+    num_tg = wi_ptr_np.size - 1
+    print(
+        f"wrote {wi_path} ({wi_ptr_np.size} u32) and {info_path} "
+        f"({winfo_np.shape[0]} work items x8 u32) for "
+        f"b={batch} kvh={kvh} ctx={ctx} mtp={mtp}"
+    )
+    print(
+        f">>> RUN THE EMU WITH  available_tgs={num_tg}  load_meta=1  "
+        f"(grid_size_x must equal len(work_indptr)-1={num_tg}, else GPU reads work_indptr OOB)"
+    )
+    assert int(wi_ptr_np[-1]) == winfo_np.shape[0], (
+        f"work_indptr.back()={int(wi_ptr_np[-1])} != num work items={winfo_np.shape[0]}; "
+        "metadata inconsistent, emu generate_reduce_info would read work_info OOB"
+    )
+
+
 if __name__ == "__main__":
-    main()
+    import argparse
+
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--bin", action="store_true",
+                    help="write work_indptr.bin/work_info.bin for one config instead of printing all")
+    ap.add_argument("--batch", type=int, default=1)
+    ap.add_argument("--kvh", type=int, default=8)
+    ap.add_argument("--ctx", type=int, default=4097)
+    ap.add_argument("--mtp", type=int, default=1)
+    ap.add_argument("--out", default=".", help="output dir for the .bin files (the emu run dir)")
+    args = ap.parse_args()
+
+    if args.bin:
+        dump_bin(args.batch, args.kvh, args.ctx, args.mtp, args.out)
+    else:
+        main()
