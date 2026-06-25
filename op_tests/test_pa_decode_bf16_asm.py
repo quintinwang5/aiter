@@ -364,10 +364,17 @@ def cpu_reduce_v1(out, split_o, split_lse, reduce_indptr, reduce_final_map,
             continue  # direct-to-O: kernel already wrote output, skip
 
         qo_start, qo_end = rfm[g]
-        partial_tiles = rpm[s0:s1]   # tile indices p, shape [num_partials]
+        # reduce_partial_map holds the split_o ROW base (= partial_o_loc = qlen*tile),
+        # already qlen-scaled by get_pa_metadata_v1 (v1_1_device.cuh: loc_partial_outputs
+        # increments by qlen per partition). The official reduce (csrc reduce.cu) and the
+        # emu (common_ps.h) index split_o as `partial_o_loc + qi` directly — do NOT
+        # multiply by qlen again. The old `* qlen_with_mtp` double-scaled it, reading
+        # split_o[2*loc+qi] for mtp>=1 (correct only for mtp=0 where qlen=1) -> wrong/zero
+        # rows at deep split. (Matches emu now.)
+        partial_locs = rpm[s0:s1]    # split_o row bases (partial_o_loc), [num_partials]
 
         for qi in range(qo_end - qo_start):
-            rows  = partial_tiles * qlen_with_mtp + qi   # row in split buffers
+            rows  = partial_locs + qi                    # row in split buffers = loc + qo/mtp pos
             lses  = sl[rows]            # [num_partials, q_head_num]
             m     = lses.max(dim=0).values               # [q_head_num]
             w     = torch.exp(lses - m).sum(dim=0)       # [q_head_num]
