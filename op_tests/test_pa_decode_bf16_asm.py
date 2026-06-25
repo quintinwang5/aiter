@@ -307,7 +307,15 @@ def build_pa_metadata(batch, kv_head_num, gqa, qo_indptr, kv_indptr, context_len
         reduce_indptr,
         reduce_final_map,
         reduce_partial_map,
-        kv_granularity=page_size,
+        # KV-GRANULARITY = WAVES*page_size (4 pages): this kernel processes WAVES
+        # pages per loop iteration, ONE page per wave. With kv_granularity=page_size
+        # every split work item is single-page -> 3 of 4 waves are OOB (clamp+mask),
+        # a barely-exercised path that produces wrong/nondeterministic results on
+        # silicon (deep-split). 4-page chunks keep all 4 waves valid = the multi-page
+        # shape the kernel was HW-validated on. (Sequences not a multiple of 4 pages
+        # still leave a <4-page remainder chunk; exact multiples like 1024/4096 are
+        # fully covered.)
+        kv_granularity=4 * page_size,
         block_size=page_size,
         max_seqlen_qo=qlen_with_mtp,
         uni_seqlen_qo=qlen_with_mtp,
