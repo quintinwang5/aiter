@@ -10,7 +10,7 @@ CO_ACTIVE=$CO_DIR/pa_decode_bf16_d64_page256_gqa8_tq16.co
 REPS=${PA_VMASK_REPS:-200}
 CFG="-c 1024 4096"      # pure-split, no partial page; add 4097 to include partial
 
-for v in baseline qkwait maxsync nuclear; do
+for v in xwrbypass nuclear baseline; do
   echo "==================================================================="
   echo "===== VARIANT: $v   (md5 $(md5sum $CO_DIR/pa_decode_bf16_d64_page256_gqa8_tq16.co.$v | cut -d' ' -f1)) ====="
   echo "==================================================================="
