@@ -635,9 +635,12 @@ def test_pa_decode(
         reduce_final_map,
         reduce_partial_map,
         split_rows,
-    ) = build_pa_metadata(
+    ) = make_sched2_metadata(
+        # META-CONSISTENCY: OLD/emu convention (common_ps.h generate_metadata) the
+        # SP3 kernel was authored against — NOT get_pa_metadata_v1 (v1_2_pa_device,
+        # a different work-item convention that fails cases the emu passes).
         batch, kv_head_num, gqa, qo_indptr, kv_indptr, seq_lens_kv,
-        page_size, qlen_with_mtp, device,
+        page_size, qlen_with_mtp, num_cu, device, is_causal=True,
     )
     split_o = torch.zeros(
         (split_rows, 1, q_head_num, head_dim), dtype=dtypes.fp32, device=device
@@ -852,9 +855,12 @@ def _build_pa_inputs(
         reduce_final_map,
         reduce_partial_map,
         split_rows,
-    ) = build_pa_metadata(
+    ) = make_sched2_metadata(
+        # META-CONSISTENCY: OLD/emu convention (common_ps.h generate_metadata) the
+        # SP3 kernel was authored against — NOT get_pa_metadata_v1 (v1_2_pa_device,
+        # a different work-item convention that fails cases the emu passes).
         batch, kv_head_num, gqa, qo_indptr, kv_indptr, seq_lens_kv,
-        page_size, qlen_with_mtp, device,
+        page_size, qlen_with_mtp, num_cu, device, is_causal=True,
     )
     sink = torch.full((q_head_num,), -1.0e30, dtype=dtypes.fp32, device=device)
 
