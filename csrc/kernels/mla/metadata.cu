@@ -229,7 +229,10 @@ void get_pa_metadata_v1(
         reduce_indptr,
         reduce_final_map,
         reduce_partial_map);
-
+    // NOTE: the multi-batch reduce-map bug is fixed IN-KERNEL (v1_2_pa_device.cuh:
+    // gate the reduce-group write on split_idx==0 so it fires once per closing, not
+    // once per lane-0 strided iteration). No host post-pass needed -> metadata stays
+    // fully on-GPU (no work_info host sync).
 }
 
 
