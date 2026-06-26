@@ -852,16 +852,20 @@ def _build_pa_inputs(
         reduce_final_map,
         reduce_partial_map,
         split_rows,
-    ) = build_pa_metadata(
+    ) = make_sched2_metadata(
+        # META-CONSISTENCY: OLD/emu convention (common_ps.h generate_metadata) the
+        # SP3 kernel was authored against — NOT get_pa_metadata_v1 (v1_2_pa_device).
         batch,
         kv_head_num,
         gqa,
         qo_indptr,
         kv_indptr,
         seq_lens_kv,
-        page_size,
-        qlen_with_mtp,
+        page_size,        # block_size
+        qlen_with_mtp,    # qlen_granularity
+        torch.cuda.get_device_properties(device).multi_processor_count,  # available_tgs
         device,
+        is_causal=True,
     )
     sink = torch.full((q_head_num,), -1.0e30, dtype=dtypes.fp32, device=device)
 
