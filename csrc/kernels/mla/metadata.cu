@@ -229,57 +229,10 @@ void get_pa_metadata_v1(
         reduce_indptr,
         reduce_final_map,
         reduce_partial_map);
-
-    // ---- REDUCE-MAP FIX ----------------------------------------------------
-    // The device kernel's in-loop reduce-map generation is buggy for multi-batch
-    // (it drops/duplicates reduce groups and lags the qo ranges -> later batches
-    // are never reduced -> wrong output for batch>=2). The WORK distribution
-    // (work_indptr / work_info) it produces IS correct, so discard the kernel's
-    // reduce maps and rebuild them from work_info on the host via the proven
-    // generate_reduce_info (identical to the get_ps_metadata_v1 host path). Only
-    // a small work_info host sync is added; the heavy work split stays on-GPU.
-    {
-        auto cpu_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU);
-        auto wip_cpu = work_indptr.to(torch::kCPU);
-        auto wi_cpu  = work_info_set.to(torch::kCPU);
-        const int32_t* wip_p        = wip_cpu.data_ptr<int32_t>();
-        const int32_t  actual_works = wip_p[wip_cpu.numel() - 1];
-        const int32_t* wi_p         = wi_cpu.data_ptr<int32_t>();
-
-        std::vector<WorkInfo> work_info_vec(actual_works);
-        for(int32_t i = 0; i < actual_works; ++i)
-        {
-            WorkInfo w;
-            w.batch_idx     = wi_p[i * kSizeWorkInfoInDw + 0];
-            w.partial_o_loc = wi_p[i * kSizeWorkInfoInDw + 1];
-            w.qo_start      = wi_p[i * kSizeWorkInfoInDw + 2];
-            w.qo_end        = wi_p[i * kSizeWorkInfoInDw + 3];
-            w.kv_start      = wi_p[i * kSizeWorkInfoInDw + 4];
-            w.kv_end        = wi_p[i * kSizeWorkInfoInDw + 5];
-            w.kv_offset     = wi_p[i * kSizeWorkInfoInDw + 6];
-            w.q_head_range  = wi_p[i * kSizeWorkInfoInDw + 7];
-            work_info_vec[i] = w;
-        }
-
-        std::vector<int32_t>  reduce_indptr_vec(reduce_indptr.numel(), 0);
-        std::vector<FinalLoc> reduce_final_map_vec(reduce_final_map.numel() / kSizeFinalLocInDw);
-        std::vector<int32_t>  reduce_partial_map_vec(reduce_partial_map.numel(), 0);
-
-        generate_reduce_info(actual_works,
-                             work_info_vec,
-                             reduce_indptr_vec,
-                             reduce_final_map_vec,
-                             reduce_partial_map_vec);
-
-        reduce_indptr.copy_(
-            torch::from_blob(reduce_indptr_vec.data(), {reduce_indptr.numel()}, cpu_i32));
-        reduce_final_map.copy_(torch::from_blob(
-            reduce_final_map_vec.data(),
-            {static_cast<int64_t>(reduce_final_map_vec.size()), kSizeFinalLocInDw},
-            cpu_i32));
-        reduce_partial_map.copy_(torch::from_blob(
-            reduce_partial_map_vec.data(), {reduce_partial_map.numel()}, cpu_i32));
-    }
+    // NOTE: the multi-batch reduce-map bug is fixed IN-KERNEL (v1_2_pa_device.cuh:
+    // gate the reduce-group write on split_idx==0 so it fires once per closing, not
+    // once per lane-0 strided iteration). No host post-pass needed -> metadata stays
+    // fully on-GPU (no work_info host sync).
 }
 
 

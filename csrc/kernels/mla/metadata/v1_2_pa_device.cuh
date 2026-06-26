@@ -176,8 +176,18 @@ __launch_bounds__(opus::get_warp_size(), 1) __global__
                             // set work info
                             work_info.partial_qo_loc = partial_idx + qo_tile_idx * qo_tile_size;
 
-                            // set reduce info
-                            if(lane_idx == 0)
+                            // set reduce info: write ONE reduce group per closing
+                            // (per qo-tile), not once per lane-0 iteration. This is a
+                            // wave32 kernel and the enclosing loop is `for idx=lane_idx;
+                            // idx<num_splits; idx+=warp_size`, so when num_splits > 32
+                            // lane 0 runs this body multiple times (idx=0,32,...) and
+                            // would emit duplicate groups -> overflow the (num_groups)-
+                            // sized reduce buffer -> later batches dropped (the kvh=1
+                            // deep-split failure; kvh=4 has num_splits<=32 so it escaped).
+                            // Gate on split_idx==0 so exactly one group is written per
+                            // closing. (PA decode has num_qo_tiles==1, so lane 0 / idx 0
+                            // covers the single qo-tile.)
+                            if(lane_idx == 0 && split_idx == 0)
                             {
                                 params.p_reduce_indptr[global_reduce_tile_idx + 1] =
                                     last_reduce_indptr + (qo_tile_idx + 1) * num_splits;

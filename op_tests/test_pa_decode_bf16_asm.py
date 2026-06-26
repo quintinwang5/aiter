@@ -112,15 +112,8 @@ def make_sched2_metadata(
     which correctly assigns full sequences to TGs.
     """
     qhead_granularity = gqa
-    # DEEP-SPLIT FIX: KV granularity = WAVES(4) pages, NOT 1. The 4-wave kernel loads
-    # one page per wave per iteration, so a 1-page work item leaves 3 of 4 waves OOB
-    # whose stale cross-wave state corrupts the result on silicon. This is the kvh=1
-    # deep-split failure (avg=0 -> 1-page works); kvh=4 gets 3-page works and survives.
-    # 4-page units keep all 4 waves valid (matches build_pa_metadata's documented
-    # KV-GRANULARITY=WAVES*page guidance). ctx multiples of 4 pages are fully covered.
-    WAVES = 4
-    kvlen_granularity = WAVES * block_size
-    blocks_per_unit = kvlen_granularity // block_size  # = WAVES
+    kvlen_granularity = block_size
+    blocks_per_unit = kvlen_granularity // block_size
     qo = qo_indptr.tolist()
     kvp = kv_indptr.tolist()
     ctx = context_lens.tolist()
