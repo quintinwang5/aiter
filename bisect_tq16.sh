@@ -55,10 +55,12 @@ run_test() {
 deploy() {
     case "$1" in
         real) cp -f "$REAL_CO" "$CO_DST"; echo "deployed REAL (fix-A) -> $CO_DST" ;;
-        diag) # prefer the preserved binary (fast); rebuild only if missing
-              if [ -f "$DIAG_CO" ]; then cp -f "$DIAG_CO" "$CO_DST"; echo "deployed DIAG -> $CO_DST";
+        diag) if [ -f "$DIAG_CO" ]; then cp -f "$DIAG_CO" "$CO_DST"; echo "deployed DIAG -> $CO_DST";
               else build diag; fi ;;
-        *) echo "deploy: arg must be 'real' or 'diag'"; exit 1 ;;
+        *) # generic: deploy any staged variant tq16_bisect_co/...co.<name>
+           src="$STAGE_DIR/pa_decode_bf16_d64_page256_gqa8_tq16.co.$1"
+           if [ -f "$src" ]; then cp -f "$src" "$CO_DST"; echo "deployed $1 -> $CO_DST";
+           else echo "deploy: no staged binary '$1' (have: real, diag, $(cd "$STAGE_DIR" && ls *.co.* 2>/dev/null | sed 's/.*\.co\.//' | tr '\n' ' '))"; exit 1; fi ;;
     esac
 }
 
