@@ -29,6 +29,26 @@ def report(b, kvh, ctx, mtp):
     print(f"  MAX works on one wg    : {max(diffs) if diffs else 0}")
     print(f"  multiProcessorCount    : {mpc}")
     print(f"  RE-ENTRY?              : {'YES (some wg does >1 work)' if (diffs and max(diffs)>1) else 'NO (1 work/wg)'}")
+    # ---- structure detail ----
+    wi = winfo.reshape(-1, 8)
+    ploc = wi[:, 1].tolist()                       # field1 = ploc (-1 direct, >=0 split slot)
+    n_direct = sum(1 for p in ploc if p < 0)
+    n_split = sum(1 for p in ploc if p >= 0)
+    print(f"  WorkInfo ploc: direct(-1)={n_direct}  split(>=0)={n_split}")
+    print(f"  work_indptr first/last : {wip[0]} .. {wip[-1]}  (covers works 0..{wip[-1]-1})")
+    print(f"  works NOT covered by work_indptr: {works - wip[-1]}")
+    # how many distinct (batch,kvhead) and partitions each
+    bidx = wi[:, 0].tolist()
+    pcount = collections.Counter(b_ for b_, p in zip(bidx, ploc))
+    print(f"  sample WorkInfo rows [batch,ploc,qo_s,qo_e,kv_s_pg,kv_e_pg,kv_off,qhr]:")
+    for r in range(min(6, wi.shape[0])):
+        print("    ", wi[r].tolist())
+    # reduce tables sizes
+    try:
+        rip = out[2]
+        print(f"  reduce_indptr numel    : {rip.numel()}  first/last {rip.flatten()[0].item()}..{rip.flatten()[-1].item()}")
+    except Exception as e:
+        print("  reduce_indptr n/a", e)
 
 if __name__ == "__main__":
     torch.set_printoptions(linewidth=200)
