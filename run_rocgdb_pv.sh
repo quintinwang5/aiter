@@ -1,52 +1,42 @@
 #!/bin/bash
-# One-shot: run the PV-WMMA rocgdb dump N times on the deterministic ctx256 input
-# and diff v_V. Same input (q=k=v=0) => any v_V lane that differs across runs, or
-# is nonzero, is the nondeterministic / uninitialized source at the PV WMMA.
+# Run the PV-WMMA dump N times; GROUP by workgroup; within each workgroup, check
+# if v_V (input) and v_R_iter (output) are deterministic. Different workgroups
+# legitimately differ (different data) -> only same-wg comparison is meaningful.
 set -u
-HERE="$(cd "$(dirname "$0")" && pwd)"
-cd "$HERE"
-
-ROCGDB="${ROCGDB:-rocgdb}"
-GDB="${GDB:-rocgdb_pv.gdb}"
-REPS="${REPS:-3}"
+HERE="$(cd "$(dirname "$0")" && pwd)"; cd "$HERE"
+ROCGDB="${ROCGDB:-rocgdb}"; GDB="${GDB:-rocgdb_pv.gdb}"; REPS="${REPS:-6}"
 TEST="op_tests/test_pa_decode_bf16_asm.py -b 64 -kvh 8 --scales 1.0 1.0 1.0 -c 256 -m 0"
 CO=hsa/gfx1250/pa_decode_bf16/pa_decode_bf16_d64_page256_gqa8_tq16.co
-
-# Deploy the kernel under debug (combined / real baseline).
-if [ -x ./bisect_tq16.sh ]; then ./bisect_tq16.sh deploy real >/dev/null 2>&1; fi
-echo "deployed co md5: $(md5sum $CO 2>/dev/null | cut -d' ' -f1)"
-echo "gdb script: $GDB   test: $TEST"
-echo
+[ -x ./bisect_tq16.sh ] && ./bisect_tq16.sh deploy real >/dev/null 2>&1
+echo "co md5: $(md5sum $CO 2>/dev/null|cut -d' ' -f1)"
 
 for n in $(seq 1 "$REPS"); do
   log="rocgdb_pv_$n.log"
-  echo "=== run $n -> $log ==="
   $ROCGDB -batch -x "$GDB" --args python $TEST > "$log" 2>&1
-  # show whether we reached the PV WMMA (pc) and the v_V values
-  pc=$(grep -A1 'confirm pc' "$log" | grep -oE '0x[0-9a-f]+' | tail -1)
-  echo "  pc at dump = ${pc:-<none>}  (entry was 0x...1b00; PV WMMA should be +0x4828)"
-  # extract just the v_V dump block for diffing
-  sed -n '/v_V (A operand)/,/END DUMP/p' "$log" | grep -E '^\$[0-9]+ =' > ".vv_$n"
-  nz=$(grep -c -vE '\{(0x0, )*0x0\}' ".vv_$n")
-  echo "  v_V dump lines: $(wc -l < ".vv_$n")  nonzero-lines: $nz  (0 nonzero = V is all-zero as expected)"
+  # workgroup that this run's PV-WMMA breakpoint landed on:
+  wg=$(grep -oE '\([0-9]+,[0-9]+,[0-9]+\)\[[0-9,]+\]' "$log" | tail -1)
+  # v_V input (first 4 dumped) and v_R_iter output (8 dumped) as a signature:
+  vv=$(sed -n '/v_V (A input)/,/PV OUTPUT/p' "$log" | grep -E '^\$[0-9]+ =' | md5sum | cut -d' ' -f1)
+  out=$(sed -n '/PV OUTPUT v_R_iter/,/END DUMP/p' "$log" | grep -E '^\$[0-9]+ =' | md5sum | cut -d' ' -f1)
+  echo "run$n  wg=${wg:-?}  vV=$vv  vR_iter=$out"
+  echo "$wg" > ".wg_$n"; echo "$vv" > ".vvh_$n"; echo "$out" > ".outh_$n"
+  # keep full output dump for later inspection
+  sed -n '/PV OUTPUT v_R_iter/,/END DUMP/p' "$log" | grep -E '^\$[0-9]+ =' > ".out_$n"
 done
 
 echo
-echo "===== diff v_V across runs (same q=k=v=0 input) ====="
-ok=1
-for n in $(seq 2 "$REPS"); do
-  if diff -q ".vv_1" ".vv_$n" >/dev/null; then
-    echo "run1 == run$n : v_V identical"
-  else
-    echo "run1 != run$n : *** v_V NONDETERMINISTIC ***"; ok=0
-    diff ".vv_1" ".vv_$n" | head -20
-  fi
-done
+echo "===== group by workgroup; within a wg, vV and vR_iter MUST match if deterministic ====="
+# crude grouping: for each pair with same wg, compare hashes
+for a in $(seq 1 "$REPS"); do for b in $(seq $((a+1)) "$REPS"); do
+  wa=$(cat ".wg_$a"); wb=$(cat ".wg_$b")
+  [ "$wa" = "$wb" ] || continue
+  vva=$(cat ".vvh_$a"); vvb=$(cat ".vvh_$b")
+  oa=$(cat ".outh_$a"); ob=$(cat ".outh_$b")
+  printf "wg=%s  run%s vs run%s:  vV %s   vR_iter %s\n" "$wa" "$a" "$b" \
+     "$([ "$vva" = "$vvb" ] && echo SAME || echo DIFF)" \
+     "$([ "$oa" = "$ob" ] && echo SAME || echo '*** DIFF (nondeterministic OUTPUT) ***')"
+done; done
 echo
-if [ "$ok" = 1 ]; then
-  echo "VERDICT: v_V deterministic across runs."
-  echo "  -> if also all-zero: V is fine; nondeterminism is downstream (P/cvt/fold/reduce)."
-  echo "  -> if nonzero-but-identical: V loaded wrong-but-deterministic (a layout bug, not a race)."
-else
-  echo "VERDICT: v_V differs run-to-run with identical input => uninitialized/racing V at PV WMMA = the bug source."
-fi
+echo "Interpretation:"
+echo "  same-wg vV SAME + vR_iter SAME  -> PV is deterministic for that wg (bug elsewhere/other wg)"
+echo "  same-wg vV SAME + vR_iter DIFF  -> PV WMMA output nondeterministic w/ same input => WMMA/P or output-reg race"
