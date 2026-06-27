@@ -315,7 +315,11 @@ def build_pa_metadata(batch, kv_head_num, gqa, qo_indptr, kv_indptr, context_len
         # shape the kernel was HW-validated on. (Sequences not a multiple of 4 pages
         # still leave a <4-page remainder chunk; exact multiples like 1024/4096 are
         # fully covered.)
-        kv_granularity=page_size,
+        # DIAG (2026-06-27): kv_granularity togglable via env PA_KVGRAN_PAGES
+        # (default 1 = original page_size; set 4 = WAVES*page_size so split items
+        # are 4-page = all 4 waves valid). Lets us A/B the single-real-wave split
+        # hypothesis without editing. See comment above.
+        kv_granularity=int(os.environ.get("PA_KVGRAN_PAGES", "1")) * page_size,
         block_size=page_size,
         max_seqlen_qo=qlen_with_mtp,
         uni_seqlen_qo=qlen_with_mtp,
