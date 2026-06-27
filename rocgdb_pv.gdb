@@ -1,42 +1,38 @@
-# rocgdb: dump PV-WMMA wave regs to localize tq16 ctx256 nondeterminism.
-# Input deterministic (manual_seed(0)+fixed --scales) => regs differing across
-# runs = the nondeterministic source.
-# Run: rocgdb -batch -x rocgdb_pv.gdb --args python op_tests/test_pa_decode_bf16_asm.py -b 64 -kvh 8 --scales 1.0 1.0 1.0 -c 256 -m 0
+# Stop at the FIRST PV WMMA (not kernel entry) of one GPU wave and dump V + output.
+# Input q=k=v=0 (deterministic) => v_V should be 0; nonzero/varying = the bug.
 set pagination off
 set print repeats 0
 set breakpoint pending on
 set confirm off
 break _ZN5aiter36pa_decode_bf16_d64_page256_gqa8_tq16E
 run
-echo \n===== after run: breakpoint state =====\n
-info breakpoints
-echo \n===== are we on a GPU wave? =====\n
-info threads
-echo \n===== where =====\n
-where
-tbreak *($pc + 0x47f4)
+echo \n===== at kernel ENTRY (wave). pc below; PV WMMA = pc + 0x4828 =====\n
+print/x $pc
+# remove the entry breakpoint so 'continue' is NOT re-caught at entry by other waves
+delete
+# break at the first PV WMMA in THIS wave's code, then run to it
+tbreak *($pc + 0x4828)
 continue
-echo \n===== AT (near) FIRST PV WMMA =====\n
+echo \n===== should now be AT first PV WMMA: confirm pc =====\n
+print/x $pc
 where
-echo \n--- v_V (A) v122..v137 ---\n
+echo \n--- v_V (A operand) v122..v137 : EXPECT 0 for q=k=v=0 ---\n
 p/x $v122
+p/x $v123
 p/x $v124
+p/x $v125
 p/x $v126
+p/x $v127
 p/x $v128
+p/x $v129
 p/x $v130
+p/x $v131
 p/x $v132
+p/x $v133
 p/x $v134
+p/x $v135
 p/x $v136
-echo \n--- v_SP (B/P) v2..v8 ---\n
-p/x $v2
-p/x $v4
-p/x $v6
-echo \n--- step, then D=v_R_iter v188..v195 ---\n
-stepi
-p/x $v188
-p/x $v190
-p/x $v192
-p/x $v194
+p/x $v137
 echo \n===== END DUMP =====\n
 kill
 quit
