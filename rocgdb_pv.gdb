@@ -1,6 +1,6 @@
-# Dump the FINAL normalized v_R (fp32, v66..v83) at the bf16-cvt (text 0xDF70),
-# i.e. the value about to be stored. Group by workgroup; compare same-wg runs.
-# Input q=k=v=0 fixed => same-wg differences across runs = the nondeterministic stage.
+# Catch the RE-ENTRY (2nd) work of a persistent wave at the final cvt (text 0xDF70)
+# and dump its final v_R (v66..v83). Persistent re-entry (Bug B) is the suspect for
+# the nondeterminism that the one-shot 1st-work probe missed.
 set pagination off
 set print repeats 0
 set breakpoint pending on
@@ -8,11 +8,34 @@ set confirm off
 break _ZN5aiter36pa_decode_bf16_d64_page256_gqa8_tq16E
 run
 delete
-tbreak *($pc + 0xdf70)
+python
+import gdb, re
+addr = int(gdb.parse_and_eval("$pc")) + 0xdf70
+seen = {}
+class ReentryBP(gdb.Breakpoint):
+    def stop(self):
+        try:
+            info = gdb.execute("info threads", to_string=True)
+        except Exception:
+            return True
+        cur = [l for l in info.splitlines() if l.lstrip().startswith('*')]
+        if not cur:
+            return False
+        m = re.search(r'\((\d+,\d+,\d+)\)', cur[0])
+        if not m:
+            return False
+        wg = m.group(1)
+        seen[wg] = seen.get(wg, 0) + 1
+        if seen[wg] >= 2:
+            gdb.write("\n===== WG %s RE-ENTRY hit #%d =====\n" % (wg, seen[wg]))
+            return True
+        return False
+ReentryBP("*0x%x" % addr)
+end
 continue
-echo \n===== WORKGROUP =====\n
+echo \n===== WORKGROUP (re-entry work) =====\n
 info threads
-echo \n===== FINAL v_R (fp32, v66..v83) =====\n
+echo \n===== FINAL v_R (fp32, v66..v83) re-entry work =====\n
 p/x $v66
 p/x $v67
 p/x $v68
