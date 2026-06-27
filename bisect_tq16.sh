@@ -20,13 +20,22 @@
 # ============================================================================
 set -euo pipefail
 
+# Self-contained: resolve everything from the script's own location (the mi400_aiter
+# tree). Portable to any machine where mi400_aiter is synced — the preserved .co
+# binaries live in ./tq16_bisect_co/ next to this script, so no sched2 dependency
+# for deploy/test. (sched2 paths below are only used by the optional `build` cmd,
+# which re-assembles from .sp3 and is not needed to swap+run prebuilt binaries.)
 HERE="$(cd "$(dirname "$0")" && pwd)"
-BUILD_DIR="/local_vol1_nobackup/qiwan/sched2/pa_co_build"
-SCHED2="/local_vol1_nobackup/qiwan/sched2"
-AITER="/local_vol1_nobackup/qiwan/mi400_aiter"
+AITER="$HERE"
+STAGE_DIR="$HERE/tq16_bisect_co"
 CO_DST="$AITER/hsa/gfx1250/pa_decode_bf16/pa_decode_bf16_d64_page256_gqa8_tq16.co"
 
-REAL_CO="$BUILD_DIR/pa_decode_bf16_d64_page256_gqa8_tq16.co.fixA_real"
+REAL_CO="$STAGE_DIR/pa_decode_bf16_d64_page256_gqa8_tq16.co.fixA_real"
+DIAG_CO="$STAGE_DIR/pa_decode_bf16_d64_page256_gqa8_tq16.co.diag"
+
+# Build-only paths (used solely by `build real|diag`; ignored on machines without sched2).
+BUILD_DIR="/home/carhuang/qiwan/sched2/pa_co_build"
+SCHED2="/local_vol1_nobackup/qiwan/sched2"
 DIAG_VARIANT="$SCHED2/PA_DECODE_D64_1TG_4W_PS.sp3.willa_fix.preload.rspill_2.tq16_from_tq32_check.curso"
 REAL_VARIANT="$SCHED2/PA_DECODE_D64_1TG_4W_PS.sp3.willa_fix.preload.rspill_2.tq16.curso"
 
@@ -46,8 +55,9 @@ run_test() {
 deploy() {
     case "$1" in
         real) cp -f "$REAL_CO" "$CO_DST"; echo "deployed REAL (fix-A) -> $CO_DST" ;;
-        diag) # diag has no preserved .co; build it
-              build diag ;;
+        diag) # prefer the preserved binary (fast); rebuild only if missing
+              if [ -f "$DIAG_CO" ]; then cp -f "$DIAG_CO" "$CO_DST"; echo "deployed DIAG -> $CO_DST";
+              else build diag; fi ;;
         *) echo "deploy: arg must be 'real' or 'diag'"; exit 1 ;;
     esac
 }
@@ -75,7 +85,7 @@ case "$cmd" in
     build)     build "$@" ;;
     which)     which_co ;;
     test)      if [ "$#" -gt 0 ]; then run_test "$@"; else run_test "${DEF_ARGS[@]}"; fi ;;
-    diag-test) build diag; run_test "${DEF_ARGS[@]}" ;;
+    diag-test) deploy diag; run_test "${DEF_ARGS[@]}" ;;
     real-test) deploy real; run_test "${DEF_ARGS[@]}" ;;
     *) echo "unknown cmd '$cmd' (deploy|build|which|test|diag-test|real-test)"; exit 1 ;;
 esac
