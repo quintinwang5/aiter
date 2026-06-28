@@ -695,6 +695,16 @@ def test_pa_decode(
     else:
         sink = torch.full((q_head_num,), -1.0e30, dtype=dtypes.fp32, device=device)
 
+    import os as _ptr
+    if _ptr.environ.get("PA_PTR"):
+        def _m(t): return hex(t.data_ptr() & 0x1ffffffffff)  # 25-bit-aperture masked low
+        print("[PA_PTR] base pointers (data_ptr, & aperture):")
+        for nm, t in [("Q", Q), ("K", K), ("V", V), ("kv_indices", kv_indices),
+                      ("kv_indptr", kv_indptr), ("seq_lens_kv", seq_lens_kv),
+                      ("qo_indptr", qo_indptr), ("work_indptr", work_indptr),
+                      ("work_info", work_info), ("split_o", split_o),
+                      ("split_lse", split_lse), ("sink", sink)]:
+            print(f"   {nm:12s} = {hex(t.data_ptr())}  (masked {_m(t)})  nbytes={t.numel()*t.element_size()}")
     out, us = run_pa_stage(
         Q,
         K,
