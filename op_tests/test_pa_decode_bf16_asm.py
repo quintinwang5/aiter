@@ -621,22 +621,33 @@ def test_pa_decode(
 
     num_phys_pages = max_blocks
     # Keep magnitudes modest so FP8 e4m3 represents them well.
-    Q = (
-        0.5
-        * torch.randn(batch, qlen_with_mtp, kv_head_num, gqa, head_dim, device=device)
-    ).to(fp8)
-    K = (
-        0.5
-        * torch.randn(
-            num_phys_pages, kv_head_num, head_dim // 16, page_size, 16, device=device
-        )
-    ).to(fp8)
-    V = (
-        0.5
-        * torch.randn(
-            num_phys_pages, kv_head_num, page_size // 16, head_dim, 16, device=device
-        )
-    ).to(fp8)
+    # QKV_CONST=<v>: fill Q/K/V with the fixed constant v (clamped to [0.1, 0.5])
+    # instead of random, for deterministic/reproducible debugging.
+    import os as _qkvc
+    _qc = _qkvc.environ.get("QKV_CONST")
+    if _qc is not None:
+        _v = min(max(float(_qc), 0.1), 0.5)
+        print(f"[QKV_CONST] Q/K/V filled with constant {_v}")
+        Q = torch.full((batch, qlen_with_mtp, kv_head_num, gqa, head_dim), _v, device=device).to(fp8)
+        K = torch.full((num_phys_pages, kv_head_num, head_dim // 16, page_size, 16), _v, device=device).to(fp8)
+        V = torch.full((num_phys_pages, kv_head_num, page_size // 16, head_dim, 16), _v, device=device).to(fp8)
+    else:
+        Q = (
+            0.5
+            * torch.randn(batch, qlen_with_mtp, kv_head_num, gqa, head_dim, device=device)
+        ).to(fp8)
+        K = (
+            0.5
+            * torch.randn(
+                num_phys_pages, kv_head_num, head_dim // 16, page_size, 16, device=device
+            )
+        ).to(fp8)
+        V = (
+            0.5
+            * torch.randn(
+                num_phys_pages, kv_head_num, page_size // 16, head_dim, 16, device=device
+            )
+        ).to(fp8)
 
     # ---- sched2-convention split-KV metadata + scratch ----
     # META-CONSISTENCY: use make_sched2_metadata (the OLD/emu convention the SP3
