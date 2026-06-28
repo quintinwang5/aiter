@@ -615,6 +615,16 @@ def test_pa_decode(
     kv_indices = torch.cat(
         [block_tables[i, : int(actual_blocks[i].item())] for i in range(batch)]
     ).to(torch.int32)
+    import os as _kvp
+    _npad = int(_kvp.environ.get("KVPAD", "0"))
+    if _npad:
+        # DIAG: pad kv_indices with extra VALID block ids (kv_indptr unchanged, so the
+        # kernel logically still uses only the real entries). If a small-batch fault
+        # disappears, the kernel is READING PAST the real kv_indices length (scalar-
+        # cache over-fetch across a page, or a clamp reading kv_indices[len..]).
+        pad = torch.zeros(_npad, dtype=torch.int32, device=device)  # block 0 = valid
+        kv_indices = torch.cat([kv_indices, pad])
+        print(f"[KVPAD] kv_indices padded by {_npad} -> len {kv_indices.numel()}")
     qo_indptr = torch.arange(
         0, (batch + 1) * qlen_with_mtp, qlen_with_mtp, dtype=torch.int32, device=device
     )
@@ -731,21 +741,6 @@ def test_pa_decode(
         sink,
     )
 
-    import os as _os
-    if _os.environ.get("PA_DBG"):
-        o = out.float().reshape(-1, out.shape[-1]); r = ref.float().reshape(-1, out.shape[-1])
-        rownrm_o = o.norm(dim=-1); rownrm_r = r.norm(dim=-1)
-        ratio = (rownrm_o / (rownrm_r + 1e-9))
-        print("=== PA_DBG: out vs ref ===  shape", tuple(out.shape))
-        print("  row0  out[:8]:", o[0, :8].tolist())
-        print("  row0  ref[:8]:", r[0, :8].tolist())
-        print("  out[0]/ref[0] elemwise:", (o[0, :8] / (r[0, :8] + 1e-9)).tolist())
-        print("  per-row |out|/|ref| ratio: mean %.4f min %.4f max %.4f" % (ratio.mean(), ratio.min(), ratio.max()))
-        print("  #rows ratio~0.25(+-.05):", int(((ratio > .20) & (ratio < .30)).sum()),
-              " ~0.5:", int(((ratio > .45) & (ratio < .55)).sum()),
-              " ~1.0:", int(((ratio > .95) & (ratio < 1.05)).sum()),
-              " /total:", ratio.numel())
-        print("  any NaN out:", bool(out.isnan().any()), " any Inf out:", bool(out.isinf().any()))
     # Per-element check (detailed report) + RMS/peak (the kernel's actual
     # acceptance metric).  Big scales -> razor-sharp softmax: per-element noise
     # (exp2 vs exp) grows but RMS stays tiny, so judge correctness by nrms.
@@ -838,6 +833,16 @@ def _build_pa_inputs(
     kv_indices = torch.cat(
         [block_tables[i, : int(actual_blocks[i].item())] for i in range(batch)]
     ).to(torch.int32)
+    import os as _kvp
+    _npad = int(_kvp.environ.get("KVPAD", "0"))
+    if _npad:
+        # DIAG: pad kv_indices with extra VALID block ids (kv_indptr unchanged, so the
+        # kernel logically still uses only the real entries). If a small-batch fault
+        # disappears, the kernel is READING PAST the real kv_indices length (scalar-
+        # cache over-fetch across a page, or a clamp reading kv_indices[len..]).
+        pad = torch.zeros(_npad, dtype=torch.int32, device=device)  # block 0 = valid
+        kv_indices = torch.cat([kv_indices, pad])
+        print(f"[KVPAD] kv_indices padded by {_npad} -> len {kv_indices.numel()}")
     qo_indptr = torch.arange(
         0, (batch + 1) * qlen_with_mtp, qlen_with_mtp, dtype=torch.int32, device=device
     )
