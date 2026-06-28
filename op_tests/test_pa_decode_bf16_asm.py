@@ -754,12 +754,23 @@ def test_pa_decode(
     )
     nrms = rms_rel_err(ref, out)
 
+    # Effective HBM bandwidth. PA-decode is memory-bound: the dominant traffic is
+    # reading the attended K and V pages from the KV cache (fp8), plus Q in and O
+    # out. KV bytes = (attended tokens) * kv_head_num * head_dim * elem * 2 (K+V).
+    kv_tokens = int(actual_blocks.sum().item()) * page_size
+    kv_bytes = kv_tokens * kv_head_num * head_dim * K.element_size() * 2
+    q_bytes = Q.numel() * Q.element_size()
+    o_bytes = out.numel() * out.element_size()
+    total_bytes = kv_bytes + q_bytes + o_bytes
+    tbps = (total_bytes / (us * 1e-6)) / 1e12 if us > 0 else 0.0
+
     return {
         "max_kv": int(seq_lens_kv.max().item()),
         "mtp": mtp,
         "sink": use_sink,
         "qkv_scale": (query_scale, key_scale, value_scale),
         "us": us,
+        "TB/s": round(tbps, 2),
         "err": err,
         "nrms": nrms,
     }
