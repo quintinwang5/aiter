@@ -615,16 +615,6 @@ def test_pa_decode(
     kv_indices = torch.cat(
         [block_tables[i, : int(actual_blocks[i].item())] for i in range(batch)]
     ).to(torch.int32)
-    import os as _kvp
-    _npad = int(_kvp.environ.get("KVPAD", "0"))
-    if _npad:
-        # DIAG: pad kv_indices with extra VALID block ids (kv_indptr unchanged, so the
-        # kernel logically still uses only the real entries). If a small-batch fault
-        # disappears, the kernel is READING PAST the real kv_indices length (scalar-
-        # cache over-fetch across a page, or a clamp reading kv_indices[len..]).
-        pad = torch.zeros(_npad, dtype=torch.int32, device=device)  # block 0 = valid
-        kv_indices = torch.cat([kv_indices, pad])
-        print(f"[KVPAD] kv_indices padded by {_npad} -> len {kv_indices.numel()}")
     qo_indptr = torch.arange(
         0, (batch + 1) * qlen_with_mtp, qlen_with_mtp, dtype=torch.int32, device=device
     )
@@ -695,16 +685,6 @@ def test_pa_decode(
     else:
         sink = torch.full((q_head_num,), -1.0e30, dtype=dtypes.fp32, device=device)
 
-    import os as _ptr
-    if _ptr.environ.get("PA_PTR"):
-        def _m(t): return hex(t.data_ptr() & 0x1ffffffffff)  # 25-bit-aperture masked low
-        print("[PA_PTR] base pointers (data_ptr, & aperture):")
-        for nm, t in [("Q", Q), ("K", K), ("V", V), ("kv_indices", kv_indices),
-                      ("kv_indptr", kv_indptr), ("seq_lens_kv", seq_lens_kv),
-                      ("qo_indptr", qo_indptr), ("work_indptr", work_indptr),
-                      ("work_info", work_info), ("split_o", split_o),
-                      ("split_lse", split_lse), ("sink", sink)]:
-            print(f"   {nm:12s} = {hex(t.data_ptr())}  (masked {_m(t)})  nbytes={t.numel()*t.element_size()}")
     out, us = run_pa_stage(
         Q,
         K,
@@ -843,16 +823,6 @@ def _build_pa_inputs(
     kv_indices = torch.cat(
         [block_tables[i, : int(actual_blocks[i].item())] for i in range(batch)]
     ).to(torch.int32)
-    import os as _kvp
-    _npad = int(_kvp.environ.get("KVPAD", "0"))
-    if _npad:
-        # DIAG: pad kv_indices with extra VALID block ids (kv_indptr unchanged, so the
-        # kernel logically still uses only the real entries). If a small-batch fault
-        # disappears, the kernel is READING PAST the real kv_indices length (scalar-
-        # cache over-fetch across a page, or a clamp reading kv_indices[len..]).
-        pad = torch.zeros(_npad, dtype=torch.int32, device=device)  # block 0 = valid
-        kv_indices = torch.cat([kv_indices, pad])
-        print(f"[KVPAD] kv_indices padded by {_npad} -> len {kv_indices.numel()}")
     qo_indptr = torch.arange(
         0, (batch + 1) * qlen_with_mtp, qlen_with_mtp, dtype=torch.int32, device=device
     )
