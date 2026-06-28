@@ -762,7 +762,8 @@ def test_pa_decode(
     q_bytes = Q.numel() * Q.element_size()
     o_bytes = out.numel() * out.element_size()
     total_bytes = kv_bytes + q_bytes + o_bytes
-    tbps = (total_bytes / (us * 1e-6)) / 1e12 if us > 0 else 0.0
+    # 1024-based (binary) unit: 1 TB = 1024^4 bytes (TiB).
+    tbps = (total_bytes / (us * 1e-6)) / (1024 ** 4) if us > 0 else 0.0
 
     return {
         "max_kv": int(seq_lens_kv.max().item()),
