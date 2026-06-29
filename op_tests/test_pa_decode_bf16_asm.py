@@ -701,16 +701,12 @@ def test_pa_decode(
             )
         ).to(fp8)
 
-    # ---- sched2-convention split-KV metadata + scratch ----
-    # META-CONSISTENCY: use make_sched2_metadata (the OLD/emu convention the SP3
-    # kernel was authored against) instead of build_pa_metadata()/get_pa_metadata_v1
-    # (which runs the v1_2_pa_device GPU kernel with a DIFFERENT work-item
-    # convention -> cases that pass on the emu fail on it). make_sched2_metadata is
-    # the byte-faithful Python port of common_ps.h generate_metadata
-    # (== aiter get_ps_metadata_v1; SPLIT_KV_OVERHEAD=0 so the ports agree).
-    # available_tgs = CU count (matches the emu's available_tgs and get_ps_metadata_v1's
-    # multiProcessorCount); the kernel launch grid is derived from work_indptr length.
-    available_tgs = torch.cuda.get_device_properties(device).multi_processor_count
+    # ---- split-KV metadata (ALIGNED with ATOM) ----
+    # Use build_pa_metadata() = aiter.get_pa_metadata_v1() (v1_2_pa_device GPU kernel)
+    # — the SAME metadata path ATOM uses (build_pa_metadata_for_decode). kv_granularity
+    # = page_size, block_size = page_size, matching ATOM's max(block_size,16). This
+    # validates the kernel against ATOM's actual work-item/split convention (NOT the
+    # legacy emu make_sched2_metadata, kept above for reference). Pairs with cpu_reduce_v1.
     (
         work_indptr,
         work_info,
@@ -718,18 +714,16 @@ def test_pa_decode(
         reduce_final_map,
         reduce_partial_map,
         split_rows,
-    ) = make_sched2_metadata(
+    ) = build_pa_metadata(
         batch,
         kv_head_num,
         gqa,
         qo_indptr,
         kv_indptr,
         seq_lens_kv,
-        page_size,  # block_size
-        qlen_with_mtp,  # qlen_granularity
-        available_tgs,
+        page_size,
+        qlen_with_mtp,
         device,
-        is_causal=True,
     )
     # -inf lse / 0 o so any split the kernel leaves unwritten is inert in reduce.
     split_o = torch.zeros(
@@ -926,20 +920,17 @@ def _build_pa_inputs(
         reduce_final_map,
         reduce_partial_map,
         split_rows,
-    ) = make_sched2_metadata(
-        # META-CONSISTENCY: OLD/emu convention (common_ps.h generate_metadata) the
-        # SP3 kernel was authored against — NOT get_pa_metadata_v1 (v1_2_pa_device).
+    ) = build_pa_metadata(
+        # ALIGNED with get_pa_metadata_v1 (v1_2_pa_device) — same convention ATOM uses.
         batch,
         kv_head_num,
         gqa,
         qo_indptr,
         kv_indptr,
         seq_lens_kv,
-        page_size,  # block_size
-        qlen_with_mtp,  # qlen_granularity
-        torch.cuda.get_device_properties(device).multi_processor_count,  # available_tgs
+        page_size,
+        qlen_with_mtp,
         device,
-        is_causal=True,
     )
     sink = torch.full((q_head_num,), -1.0e30, dtype=dtypes.fp32, device=device)
 
