@@ -70,9 +70,13 @@ struct KernelArgs
     unsigned int mtp;       // 0x50  mtp
     float softmax_scale;    // 0x54  attention softmax scale (by value)
     unsigned int GQA;       // 0x58  gqa_ratio
-    float query_scale;      // 0x5C  per-tensor Q scale (by value, s25)
-    float key_scale;        // 0x60  per-tensor K scale (by value, s26)
-    float value_scale;      // 0x64  per-tensor V scale (by value, s27)
+    // TSCALE: q/k/v scales are device TENSORS (ptr_QScale/KScale/VScale below); these
+    // 3 dwords are now PADDING. Kept (not removed) so the 30-dword preload mapping and
+    // all spilled s_load offsets (ptr_O@0x78 ...) stay byte-identical. s25/s26/s27
+    // preload these dummies then get overwritten by the kernel's prologue scale deref.
+    unsigned int _pad_qscale;  // 0x5C
+    unsigned int _pad_kscale;  // 0x60
+    unsigned int _pad_vscale;  // 0x64
     unsigned int _pad0;     // 0x68  (pad; preloaded as s28)
     unsigned int _pad1;     // 0x6C  (pad; preloaded as s29)
     unsigned int _pad2;     // 0x70  (pad; preloaded as s30)
@@ -97,9 +101,6 @@ static_assert(offsetof(KernelArgs, ptr_VScale)    == 0xA8, "VScale offset");
 static_assert(offsetof(KernelArgs, kv_nheads)     == 0x40, "kv_nheads offset");
 static_assert(offsetof(KernelArgs, softmax_scale) == 0x54, "softmax_scale offset");
 static_assert(offsetof(KernelArgs, GQA)           == 0x58, "GQA offset");
-static_assert(offsetof(KernelArgs, query_scale)   == 0x5C, "query_scale offset");
-static_assert(offsetof(KernelArgs, key_scale)     == 0x60, "key_scale offset");
-static_assert(offsetof(KernelArgs, value_scale)   == 0x64, "value_scale offset");
 static_assert(offsetof(KernelArgs, ptr_O)         == 0x78, "O offset");
 static_assert(offsetof(KernelArgs, ptr_SplitO)    == 0x80, "SplitO offset");
 static_assert(offsetof(KernelArgs, ptr_Sink)      == 0x90, "Sink offset");
@@ -286,12 +287,8 @@ AITER_CTYPES_DEFINE_ENTRYPOINT_VOID(
     args.ptr_KVIndices = kv_indices->data_ptr();
     args.ptr_CL        = context_lens->data_ptr();
     args.softmax_scale = softmax_scale;                 // by-value f32 (unchanged)
-    // TSCALE: q/k/v scales are now device TENSORS; pass their pointers. The by-value
-    // float slots are dummy (kept for the unchanged preload layout). The kernel derefs
-    // ptr_QScale/KScale/VScale in the prologue.
-    args.query_scale   = 1.0f;
-    args.key_scale     = 1.0f;
-    args.value_scale   = 1.0f;
+    // TSCALE: q/k/v scales are device TENSORS; pass their pointers. (The 0x5C/0x60/0x64
+    // dwords are PADDING now — memset(0) above leaves them 0; kernel ignores them.)
 #if PA_KARG_PRELOAD
     args.ptr_QScale    = q_scale->data_ptr();
     args.ptr_KScale    = k_scale->data_ptr();
