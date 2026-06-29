@@ -477,12 +477,18 @@ def pa_decode_bf16_asm(
     kv_head_num = K.shape[1]
     q_head_num = kv_head_num * gqa
 
+    # tq16-ONLY: the deployed kernel is tile_q=16 (1 M-tile = 16 rows). A query tile
+    # holds (mtp+1)*gqa rows, so (mtp+1)*gqa <= 16; for gqa=8 that means mtp in {0,1}.
+    # tile_q=32 support was removed (see hsa/.../pa_decode_bf16.csv). mtp>=2 would need
+    # tq32 and is rejected here (the C-side kernel selector would otherwise find no
+    # usable tile and error less clearly).
+    assert mtp in (0, 1), (
+        f"pa_decode_bf16_asm: tq16-only kernel supports mtp in {{0,1}} (gqa={gqa}); "
+        f"got mtp={mtp}. (tile_q=32 / mtp>=2 support was removed.)"
+    )
+
     if out is None:
         out = torch.empty(Q.shape, dtype=torch.bfloat16, device=device)
-
-    # query/key/value_scale are 1-element fp32 dequant scales, passed straight to
-    # the kernel. softmax_scale is passed BY VALUE (kernarg 0x60); the kernel
-    # applies it, so do NOT pre-fold it into key_scale.
 
     if sink is None:
         # The kernel is compiled sink-enabled (always reads + merges the sink
@@ -492,6 +498,16 @@ def pa_decode_bf16_asm(
         sink = torch.full((q_head_num,), -1.0e30, dtype=torch.float32, device=device)
     else:
         assert sink.dtype == torch.float32, "sink must be in fp32 for pa ASM"
+
+    # TSCALE: q/k/v dequant scales are per-tensor fp32 DEVICE TENSORS (the kernel
+    # derefs their pointers). Default to 1.0 [1] tensors; coerce to fp32 contiguous.
+    def _scale_t(x):
+        if x is None:
+            return torch.ones(1, dtype=torch.float32, device=device)
+        return x.to(torch.float32).contiguous()
+    query_scale = _scale_t(query_scale)
+    key_scale = _scale_t(key_scale)
+    value_scale = _scale_t(value_scale)
 
     _pa_decode_bf16_asm(
         Q,
