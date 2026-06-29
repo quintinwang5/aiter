@@ -419,9 +419,9 @@ def _pa_decode_bf16_asm(
     kv_indices: torch.Tensor,
     context_lens: torch.Tensor,
     softmax_scale: float,
-    q_scale: float,
-    k_scale: float,
-    v_scale: float,
+    q_scale: torch.Tensor,
+    k_scale: torch.Tensor,
+    v_scale: torch.Tensor,
     out: torch.Tensor,
     qo_indptr: Optional[torch.Tensor],
     kv_indptr: torch.Tensor,
@@ -446,9 +446,9 @@ def pa_decode_bf16_asm(
     kv_indptr: torch.Tensor,
     gqa: int = 8,
     mtp: int = 0,
-    query_scale: float = 1.0,
-    key_scale: float = 1.0,
-    value_scale: float = 1.0,
+    query_scale: Optional[torch.Tensor] = None,
+    key_scale: Optional[torch.Tensor] = None,
+    value_scale: Optional[torch.Tensor] = None,
     qo_indptr: Optional[torch.Tensor] = None,
     work_indptr: Optional[torch.Tensor] = None,
     work_info: Optional[torch.Tensor] = None,
@@ -487,6 +487,16 @@ def pa_decode_bf16_asm(
         sink = torch.full((q_head_num,), -1.0e30, dtype=torch.float32, device=device)
     else:
         sink = sink.to(torch.float32).contiguous()
+
+    # TSCALE: q/k/v dequant scales are per-tensor fp32 DEVICE TENSORS (the kernel
+    # derefs their pointers). Default to 1.0 [1] tensors; coerce to fp32 contiguous.
+    def _scale_t(x):
+        if x is None:
+            return torch.ones(1, dtype=torch.float32, device=device)
+        return x.to(torch.float32).contiguous()
+    query_scale = _scale_t(query_scale)
+    key_scale = _scale_t(key_scale)
+    value_scale = _scale_t(value_scale)
 
     _pa_decode_bf16_asm(
         Q,

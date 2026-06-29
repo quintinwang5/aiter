@@ -82,9 +82,18 @@ struct KernelArgs
     void* ptr_SplitO;       // 0x80  SplitO — spilled
     void* ptr_SplitLSE;     // 0x88  SplitLSE — spilled
     void* ptr_Sink;         // 0x90  SinkBuffer (scaled-domain logits, exp(sink)) — spilled
+    // TSCALE: per-tensor Q/K/V dequant scales as fp32 DEVICE TENSOR pointers (spilled,
+    // s_load'ed + deref'd in the kernel prologue). The by-value floats at 0x5C/0x60/0x64
+    // are now dummy (kept so the 30-dword preload layout / s25-s27 are unchanged).
+    void* ptr_QScale;       // 0x98  per-tensor Q scale tensor (fp32) — spilled
+    void* ptr_KScale;       // 0xA0  per-tensor K scale tensor (fp32) — spilled
+    void* ptr_VScale;       // 0xA8  per-tensor V scale tensor (fp32) — spilled
 };
-static_assert(sizeof(KernelArgs) == 0x98,
-              "asm_pa_decode_bf16: rspill preload KernelArgs must be 0x98 (152) B");
+static_assert(sizeof(KernelArgs) == 0xB0,
+              "asm_pa_decode_bf16: rspill preload+tscale KernelArgs must be 0xB0 (176) B");
+static_assert(offsetof(KernelArgs, ptr_QScale)    == 0x98, "QScale offset");
+static_assert(offsetof(KernelArgs, ptr_KScale)    == 0xA0, "KScale offset");
+static_assert(offsetof(KernelArgs, ptr_VScale)    == 0xA8, "VScale offset");
 static_assert(offsetof(KernelArgs, kv_nheads)     == 0x40, "kv_nheads offset");
 static_assert(offsetof(KernelArgs, softmax_scale) == 0x54, "softmax_scale offset");
 static_assert(offsetof(KernelArgs, GQA)           == 0x58, "GQA offset");
@@ -204,9 +213,9 @@ AITER_CTYPES_DEFINE_ENTRYPOINT_VOID(
      aiter_tensor_t* kv_indices,
      aiter_tensor_t* context_lens,
      float           softmax_scale,
-     float           q_scale,
-     float           k_scale,
-     float           v_scale,
+     aiter_tensor_t* q_scale,
+     aiter_tensor_t* k_scale,
+     aiter_tensor_t* v_scale,
      aiter_tensor_t* out,
      aiter_tensor_t* qo_indptr,
      aiter_tensor_t* kv_indptr,
@@ -224,9 +233,10 @@ AITER_CTYPES_DEFINE_ENTRYPOINT_VOID(
      gqa, mtp, kernelName_, stream))
 {
     // ---- null safety (validate before touching the device) ----------------
-    AITER_CHECK(Q && K && V && kv_indices && context_lens && out && kv_indptr && sink,
-                "pa_decode_bf16_asm: Q/K/V/kv_indices/context_lens/out/kv_indptr/sink "
-                "must all be non-null");
+    AITER_CHECK(Q && K && V && kv_indices && context_lens && out && kv_indptr && sink
+                && q_scale && k_scale && v_scale,
+                "pa_decode_bf16_asm: Q/K/V/kv_indices/context_lens/out/kv_indptr/sink/"
+                "q_scale/k_scale/v_scale must all be non-null");
 
     HipDeviceGuard device_guard{Q->device_id};
 
@@ -275,10 +285,18 @@ AITER_CTYPES_DEFINE_ENTRYPOINT_VOID(
     args.ptr_V         = V->data_ptr();
     args.ptr_KVIndices = kv_indices->data_ptr();
     args.ptr_CL        = context_lens->data_ptr();
-    args.softmax_scale = softmax_scale;                 // by-value f32
-    args.query_scale   = q_scale;                       // by-value f32
-    args.key_scale     = k_scale;                       // by-value f32
-    args.value_scale   = v_scale;                       // by-value f32
+    args.softmax_scale = softmax_scale;                 // by-value f32 (unchanged)
+    // TSCALE: q/k/v scales are now device TENSORS; pass their pointers. The by-value
+    // float slots are dummy (kept for the unchanged preload layout). The kernel derefs
+    // ptr_QScale/KScale/VScale in the prologue.
+    args.query_scale   = 1.0f;
+    args.key_scale     = 1.0f;
+    args.value_scale   = 1.0f;
+#if PA_KARG_PRELOAD
+    args.ptr_QScale    = q_scale->data_ptr();
+    args.ptr_KScale    = k_scale->data_ptr();
+    args.ptr_VScale    = v_scale->data_ptr();
+#endif
     args.kv_nheads     = (unsigned int)kv_head_num;
     args.Qs            = (unsigned int)stride_Q;
     args.Bs            = (unsigned int)stride_KV_blk;

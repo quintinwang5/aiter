@@ -528,6 +528,11 @@ def run_pa_stage(
     # PA stage: direct-to-O for non-split work items, partials -> split_o/split_lse
     # for split (multi-page) ones (merged on host by cpu_reduce).  sink=None ->
     # wrapper fills a -inf no-op buffer (kernel always reads the sink slot).
+    # TSCALE: q/k/v scales are now per-tensor fp32 DEVICE TENSORS. Wrap the float
+    # scales into [1] tensors for the kernel (ref_pa_decode still uses the floats).
+    def _st(x):
+        return x if torch.is_tensor(x) else torch.tensor(
+            [float(x)], dtype=torch.float32, device=Q.device)
     return aiter.pa_decode_bf16_asm(
         Q,
         K,
@@ -538,9 +543,9 @@ def run_pa_stage(
         kv_indptr,
         gqa=gqa,
         mtp=mtp,
-        query_scale=query_scale,
-        key_scale=key_scale,
-        value_scale=value_scale,
+        query_scale=_st(query_scale),
+        key_scale=_st(key_scale),
+        value_scale=_st(value_scale),
         qo_indptr=qo_indptr,
         work_indptr=work_indptr,
         work_info=work_info,
@@ -762,8 +767,7 @@ def test_pa_decode(
     q_bytes = Q.numel() * Q.element_size()
     o_bytes = out.numel() * out.element_size()
     total_bytes = kv_bytes + q_bytes + o_bytes
-    # 1024-based (binary) unit: 1 TB = 1024^4 bytes (TiB).
-    tbps = (total_bytes / (us * 1e-6)) / (1024 ** 4) if us > 0 else 0.0
+    tbps = (total_bytes / (us * 1e-6)) / (1e12) if us > 0 else 0.0
 
     return {
         "max_kv": int(seq_lens_kv.max().item()),
