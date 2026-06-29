@@ -476,6 +476,16 @@ def pa_decode_bf16_asm(
     kv_head_num = K.shape[1]
     q_head_num = kv_head_num * gqa
 
+    # tq16-ONLY: the deployed kernel is tile_q=16 (1 M-tile = 16 rows). A query tile
+    # holds (mtp+1)*gqa rows, so (mtp+1)*gqa <= 16; for gqa=8 that means mtp in {0,1}.
+    # tile_q=32 support was removed (see hsa/.../pa_decode_bf16.csv). mtp>=2 would need
+    # tq32 and is rejected here (the C-side kernel selector would otherwise find no
+    # usable tile and error less clearly).
+    assert mtp in (0, 1), (
+        f"pa_decode_bf16_asm: tq16-only kernel supports mtp in {{0,1}} (gqa={gqa}); "
+        f"got mtp={mtp}. (tile_q=32 / mtp>=2 support was removed.)"
+    )
+
     if out is None:
         out = torch.empty(Q.shape, dtype=torch.bfloat16, device=device)
 

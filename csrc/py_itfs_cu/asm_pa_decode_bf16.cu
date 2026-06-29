@@ -146,12 +146,12 @@ static constexpr int PA_BDX       = 128;   // 4 waves * 32 lanes (wave32)
 
 // Kernel selection on the small set of keys captured by the csv manifest.
 //
-// tile_q selection: the manifest carries multiple TileQ variants for the same
-// (qdtype,kvdtype,hdim,page_size,gqa) key — e.g. TileQ=16 (1 WMMA M-tile, valid
-// for mtp in {0,1}) and TileQ=32 (2 M-tiles, mtp in {0..3}). A variant is usable
-// only if its query tile holds all (mtp+1) MTP layers of every GQA group, i.e.
-// (mtp+1)*gqa <= tile_q. We pick the SMALLEST usable tile_q (fewer M-tiles =
-// less work / fewer VGPRs) so short-MTP decodes run on the cheaper kernel.
+// tile_q selection (data-driven from the csv manifest). The manifest currently
+// ships ONLY TileQ=16 (1 WMMA M-tile); the TileQ=32 variant was removed, so this
+// kernel is tq16-only. A variant is usable only if its query tile holds all (mtp+1)
+// MTP layers of every GQA group, i.e. (mtp+1)*gqa <= tile_q. For tq16/gqa=8 that
+// means mtp in {0,1}; mtp>=2 finds no usable tile (caller asserts mtp in {0,1}).
+// We still pick the SMALLEST usable tile_q (generic; harmless with one variant).
 static std::string get_heuristic_kernel_pa_decode_bf16(const std::string& qdtype,
                                                        const std::string& kvdtype,
                                                        int hdim,

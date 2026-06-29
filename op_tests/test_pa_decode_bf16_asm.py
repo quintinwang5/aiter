@@ -43,7 +43,7 @@ torch.set_default_device("cuda")
 PA_HEAD_DIM = 64
 PA_PAGE_SIZE = 256
 PA_GQA_RATIO = 8
-PA_TILE_Q = 32  # kernel TileQ; mtp must be < PA_TILE_Q / gqa (= 4)
+PA_TILE_Q = 16  # kernel TileQ (tq16-only); mtp must be < PA_TILE_Q / gqa (= 2) -> mtp in {0,1}
 
 fp8 = dtypes.fp8
 
@@ -588,7 +588,7 @@ def test_pa_decode(
     """Random FP8 paged inputs (arbitrary kv_len) vs the torch host reference.
 
     scales=None -> random per-tensor q/k/v scales; otherwise the given (q,k,v).
-    mtp -> multi-token-predict layers (qlen = mtp+1); kernel requires mtp < 4.
+    mtp -> multi-token-predict layers (qlen = mtp+1); kernel requires mtp < 2 (tq16-only -> mtp in {0,1}).
     use_sink -> pass a random per-Q-head sink (pre-scale raw logits) to the kernel
     and include the matching sink term in the reference (needs the sink-enabled
     kernel binary; with the current .co the kernel ignores it and this fails).
@@ -1262,7 +1262,7 @@ if __name__ == "__main__":
         type=int,
         nargs="*",
         default=[0],
-        help="""Multi-token-predict layers (qlen = mtp+1). Kernel requires mtp < 4.
+        help="""Multi-token-predict layers (qlen = mtp+1). Kernel requires mtp < 2 (tq16-only -> mtp in {0,1}).
         e.g. -m 0 1 2 3""",
     )
     parser.add_argument(
