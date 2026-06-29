@@ -392,7 +392,7 @@ def pa_ps_fwd_asm(
 
 
 # ---------------------------------------------------------------------------
-# pa_decode_bf16_asm (gfx1250) -- persistent / split-KV paged-attention decode.
+# pa_decode_bf16_asm (gfx1250) — persistent / split-KV paged-attention decode.
 #
 # Wraps the SP3 kernel PA_DECODE_D64_1TG_4W_PS (head_dim=64, page_size=256,
 # gqa=8).  FP8 Q **and** FP8 paged KV cache, bf16 output, **per-tensor** scalar
@@ -463,8 +463,7 @@ def pa_decode_bf16_asm(
     Contract details:
       * `Q`/`K`/`V` are FP8; `out` is bf16 with Q's logical shape.
       * `query_scale`/`key_scale`/`value_scale` are the per-tensor FP8 dequant
-        scales as 1-element fp32 tensors (None means 1.0); the attention
-        `softmax_scale` (typically 1/sqrt(head_dim)) is
+        scales; the attention `softmax_scale` (typically 1/sqrt(head_dim)) is
         passed BY VALUE (kernarg 0x60) and the kernel forms
         scl_log2e = query_scale * key_scale * softmax_scale * log2e.
       * `sink` (optional) holds per-Q-head fp32 logits in the SCALED-logit
@@ -497,7 +496,7 @@ def pa_decode_bf16_asm(
         # produce inf/NaN in the in-kernel sink merge.
         sink = torch.full((q_head_num,), -1.0e30, dtype=torch.float32, device=device)
     else:
-        assert sink.dtype == torch.float32, "sink must be in fp32 for pa ASM"
+        sink = sink.to(torch.float32).contiguous()
 
     # TSCALE: q/k/v dequant scales are per-tensor fp32 DEVICE TENSORS (the kernel
     # derefs their pointers). Default to 1.0 [1] tensors; coerce to fp32 contiguous.
@@ -541,12 +540,9 @@ def pa_reduce_v1(
     reduce_final_map: Optional[torch.Tensor],
     reduce_partial_map: torch.Tensor,
     max_seqlen_q: int,
+    num_kv_splits: int,
     final_output: torch.Tensor,
     final_lse: Optional[torch.Tensor] = None,
-    # num_kv_splits is trailing+optional so the ATOM call site (which passes 8
-    # positional args, no split count) stays aligned. The kernel uses
-    # max(SM_count, num_kv_splits), so the default 0 means "auto" (SM_count).
-    num_kv_splits: int = 0,
 ) -> None:
     mla_reduce_v1(
         partial_output,
@@ -626,6 +622,7 @@ def pa_persistent_fwd(
         reduce_final_map,
         reduce_partial_map,
         max_qlen,
+        0,
         output,
         final_lse,
     )
