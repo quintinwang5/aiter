@@ -268,8 +268,17 @@ def cpu_reduce(
     return out
 
 
-def build_pa_metadata(batch, kv_head_num, gqa, qo_indptr, kv_indptr, context_lens,
-                      page_size, qlen_with_mtp, device):
+def build_pa_metadata(
+    batch,
+    kv_head_num,
+    gqa,
+    qo_indptr,
+    kv_indptr,
+    context_lens,
+    page_size,
+    qlen_with_mtp,
+    device,
+):
     """Build persistent-scheduling metadata via aiter.get_pa_metadata_v1() (GPU kernel).
 
     Mirrors ATOM's AiterAttentionMetadataBuilder.set_aiter_persistent_worker_buffers().
@@ -288,19 +297,19 @@ def build_pa_metadata(batch, kv_head_num, gqa, qo_indptr, kv_indptr, context_len
     ) = aiter.get_pa_metadata_info_v1(batch, kv_head_num)
 
     work_metadata_ptrs = torch.empty(wmp_size, dtype=wmp_dtype, device=device)
-    work_indptr        = torch.zeros(wip_size, dtype=wip_dtype, device=device)
-    work_info          = torch.zeros(wi_size,  dtype=wi_dtype,  device=device)
-    reduce_indptr      = torch.zeros(ri_size,  dtype=ri_dtype,  device=device)
-    reduce_final_map   = torch.zeros(rfm_size, dtype=rfm_dtype, device=device)
+    work_indptr = torch.zeros(wip_size, dtype=wip_dtype, device=device)
+    work_info = torch.zeros(wi_size, dtype=wi_dtype, device=device)
+    reduce_indptr = torch.zeros(ri_size, dtype=ri_dtype, device=device)
+    reduce_final_map = torch.zeros(rfm_size, dtype=rfm_dtype, device=device)
     reduce_partial_map = torch.zeros(rpm_size, dtype=rpm_dtype, device=device)
 
     aiter.get_pa_metadata_v1(
         qo_indptr,
         kv_indptr,
         context_lens,
-        gqa,          # num_heads_per_head_k
+        gqa,  # num_heads_per_head_k
         kv_head_num,  # num_heads_k
-        True,         # is_causal
+        True,  # is_causal
         work_metadata_ptrs,
         work_indptr,
         work_info,
@@ -324,12 +333,25 @@ def build_pa_metadata(batch, kv_head_num, gqa, qo_indptr, kv_indptr, context_len
     )
     # split_rows: follow ATOM convention — partial map entries × qlen
     split_rows = max(1, reduce_partial_map.numel() * qlen_with_mtp)
-    return (work_indptr, work_info, reduce_indptr, reduce_final_map,
-            reduce_partial_map, split_rows)
+    return (
+        work_indptr,
+        work_info,
+        reduce_indptr,
+        reduce_final_map,
+        reduce_partial_map,
+        split_rows,
+    )
 
 
-def cpu_reduce_v1(out, split_o, split_lse, reduce_indptr, reduce_final_map,
-                  reduce_partial_map, qlen_with_mtp=1):
+def cpu_reduce_v1(
+    out,
+    split_o,
+    split_lse,
+    reduce_indptr,
+    reduce_final_map,
+    reduce_partial_map,
+    qlen_with_mtp=1,
+):
     """CPU reduce compatible with aiter.get_pa_metadata_v1() metadata.
 
     Matches the semantics of aiter.pa_reduce_v1() (mla_reduce_v1 kernel):
@@ -348,10 +370,12 @@ def cpu_reduce_v1(out, split_o, split_lse, reduce_indptr, reduce_final_map,
     reduce_partial_map:[max_splits]   int32 — partial tile indices p
     """
     q_head_num = split_o.shape[2]
-    head_dim   = split_o.shape[3]
+    head_dim = split_o.shape[3]
 
-    out_flat = out.reshape(-1, q_head_num, head_dim)          # [batch*qlen, q_head_num, head_dim]
-    so = split_o[:, 0, :, :].float()    # [split_rows, q_head_num, head_dim]
+    out_flat = out.reshape(
+        -1, q_head_num, head_dim
+    )  # [batch*qlen, q_head_num, head_dim]
+    so = split_o[:, 0, :, :].float()  # [split_rows, q_head_num, head_dim]
     sl = split_lse[:, 0, :, 0].float()  # [split_rows, q_head_num]
 
     rip = reduce_indptr.to(torch.int64).tolist()
@@ -371,16 +395,16 @@ def cpu_reduce_v1(out, split_o, split_lse, reduce_indptr, reduce_final_map,
         # multiply by qlen again. The old `* qlen_with_mtp` double-scaled it, reading
         # split_o[2*loc+qi] for mtp>=1 (correct only for mtp=0 where qlen=1) -> wrong/zero
         # rows at deep split. (Matches emu now.)
-        partial_locs = rpm[s0:s1]    # split_o row bases (partial_o_loc), [num_partials]
+        partial_locs = rpm[s0:s1]  # split_o row bases (partial_o_loc), [num_partials]
 
         for qi in range(qo_end - qo_start):
-            rows  = partial_locs + qi                    # row in split buffers = loc + qo/mtp pos
-            lses  = sl[rows]            # [num_partials, q_head_num]
-            m     = lses.max(dim=0).values               # [q_head_num]
-            w     = torch.exp(lses - m).sum(dim=0)       # [q_head_num]
+            rows = partial_locs + qi  # row in split buffers = loc + qo/mtp pos
+            lses = sl[rows]  # [num_partials, q_head_num]
+            m = lses.max(dim=0).values  # [q_head_num]
+            w = torch.exp(lses - m).sum(dim=0)  # [q_head_num]
             g_lse = m + torch.log(w)
-            scale = torch.exp(lses - g_lse)              # [num_partials, q_head_num]
-            o     = (so[rows] * scale.unsqueeze(-1)).sum(dim=0)  # [q_head_num, head_dim]
+            scale = torch.exp(lses - g_lse)  # [num_partials, q_head_num]
+            o = (so[rows] * scale.unsqueeze(-1)).sum(dim=0)  # [q_head_num, head_dim]
 
             # Fully-masked rows (all splits have -inf LSE) → output 0
             o = torch.where(torch.isfinite(m).unsqueeze(-1), o, torch.zeros_like(o))
@@ -528,11 +552,6 @@ def run_pa_stage(
     # PA stage: direct-to-O for non-split work items, partials -> split_o/split_lse
     # for split (multi-page) ones (merged on host by cpu_reduce).  sink=None ->
     # wrapper fills a -inf no-op buffer (kernel always reads the sink slot).
-    # TSCALE: q/k/v scales are now per-tensor fp32 DEVICE TENSORS. Wrap the float
-    # scales into [1] tensors for the kernel (ref_pa_decode still uses the floats).
-    def _st(x):
-        return x if torch.is_tensor(x) else torch.tensor(
-            [float(x)], dtype=torch.float32, device=Q.device)
     return aiter.pa_decode_bf16_asm(
         Q,
         K,
@@ -543,9 +562,9 @@ def run_pa_stage(
         kv_indptr,
         gqa=gqa,
         mtp=mtp,
-        query_scale=_st(query_scale),
-        key_scale=_st(key_scale),
-        value_scale=_st(value_scale),
+        query_scale=query_scale,
+        key_scale=key_scale,
+        value_scale=value_scale,
         qo_indptr=qo_indptr,
         work_indptr=work_indptr,
         work_info=work_info,
@@ -592,6 +611,11 @@ def test_pa_decode(
     else:
         query_scale, key_scale, value_scale = scales
     softmax_scale = 1.0 / (head_dim**0.5)
+    # TSCALE: q/k/v dequant scales are per-tensor fp32 DEVICE TENSORS. Build [1]
+    # tensors here and pass them to the kernel; ref_pa_decode keeps the float values.
+    query_scale_t = torch.tensor([query_scale], dtype=torch.float32, device=device)
+    key_scale_t = torch.tensor([key_scale], dtype=torch.float32, device=device)
+    value_scale_t = torch.tensor([value_scale], dtype=torch.float32, device=device)
 
     # ---- KV lengths + paged block tables (mirrors test_pa_ps.py) ----
     if context_lens is not None:
@@ -629,28 +653,51 @@ def test_pa_decode(
     # QKV_CONST=<v>: fill Q/K/V with the fixed constant v (clamped to [0.1, 0.5])
     # instead of random, for deterministic/reproducible debugging.
     import os as _qkvc
+
     _qc = _qkvc.environ.get("QKV_CONST")
     if _qc is not None:
         _v = min(max(float(_qc), 0.1), 0.5)
         print(f"[QKV_CONST] Q/K/V filled with constant {_v}")
-        Q = torch.full((batch, qlen_with_mtp, kv_head_num, gqa, head_dim), _v, device=device).to(fp8)
-        K = torch.full((num_phys_pages, kv_head_num, head_dim // 16, page_size, 16), _v, device=device).to(fp8)
-        V = torch.full((num_phys_pages, kv_head_num, page_size // 16, head_dim, 16), _v, device=device).to(fp8)
+        Q = torch.full(
+            (batch, qlen_with_mtp, kv_head_num, gqa, head_dim), _v, device=device
+        ).to(fp8)
+        K = torch.full(
+            (num_phys_pages, kv_head_num, head_dim // 16, page_size, 16),
+            _v,
+            device=device,
+        ).to(fp8)
+        V = torch.full(
+            (num_phys_pages, kv_head_num, page_size // 16, head_dim, 16),
+            _v,
+            device=device,
+        ).to(fp8)
     else:
         Q = (
             0.5
-            * torch.randn(batch, qlen_with_mtp, kv_head_num, gqa, head_dim, device=device)
+            * torch.randn(
+                batch, qlen_with_mtp, kv_head_num, gqa, head_dim, device=device
+            )
         ).to(fp8)
         K = (
             0.5
             * torch.randn(
-                num_phys_pages, kv_head_num, head_dim // 16, page_size, 16, device=device
+                num_phys_pages,
+                kv_head_num,
+                head_dim // 16,
+                page_size,
+                16,
+                device=device,
             )
         ).to(fp8)
         V = (
             0.5
             * torch.randn(
-                num_phys_pages, kv_head_num, page_size // 16, head_dim, 16, device=device
+                num_phys_pages,
+                kv_head_num,
+                page_size // 16,
+                head_dim,
+                16,
+                device=device,
             )
         ).to(fp8)
 
@@ -678,8 +725,8 @@ def test_pa_decode(
         qo_indptr,
         kv_indptr,
         seq_lens_kv,
-        page_size,        # block_size
-        qlen_with_mtp,    # qlen_granularity
+        page_size,  # block_size
+        qlen_with_mtp,  # qlen_granularity
         available_tgs,
         device,
         is_causal=True,
@@ -711,9 +758,9 @@ def test_pa_decode(
         kv_indptr,
         gqa,
         mtp,
-        query_scale,
-        key_scale,
-        value_scale,
+        query_scale_t,
+        key_scale_t,
+        value_scale_t,
         qo_indptr,
         work_indptr,
         work_info,
@@ -888,8 +935,8 @@ def _build_pa_inputs(
         qo_indptr,
         kv_indptr,
         seq_lens_kv,
-        page_size,        # block_size
-        qlen_with_mtp,    # qlen_granularity
+        page_size,  # block_size
+        qlen_with_mtp,  # qlen_granularity
         torch.cuda.get_device_properties(device).multi_processor_count,  # available_tgs
         device,
         is_causal=True,
@@ -963,6 +1010,11 @@ def _run_pa_kernel(inp, V):
         dtype=dtypes.fp32,
         device="cuda",
     )
+    # TSCALE: build per-tensor fp32 [1] scale tensors from the float inputs.
+    _dev = inp["Q"].device
+    query_scale_t = torch.tensor([inp["query_scale"]], dtype=torch.float32, device=_dev)
+    key_scale_t = torch.tensor([inp["key_scale"]], dtype=torch.float32, device=_dev)
+    value_scale_t = torch.tensor([inp["value_scale"]], dtype=torch.float32, device=_dev)
     out = aiter.pa_decode_bf16_asm(
         inp["Q"],
         inp["K"],
@@ -973,9 +1025,9 @@ def _run_pa_kernel(inp, V):
         inp["kv_indptr"],
         gqa=inp["gqa"],
         mtp=inp["mtp"],
-        query_scale=inp["query_scale"],
-        key_scale=inp["key_scale"],
-        value_scale=inp["value_scale"],
+        query_scale=query_scale_t,
+        key_scale=key_scale_t,
+        value_scale=value_scale_t,
         qo_indptr=inp["qo_indptr"],
         work_indptr=inp["work_indptr"],
         work_info=inp["work_info"],
@@ -1040,7 +1092,9 @@ def test_pa_decode_vmask(
     #       kernel is nondeterministic the vmask diff is dominated by the race.
     # `out` (direct-O) is torch.empty -> uninitialized for split rows, so we judge by
     # split_o (zero-init kernel partials) and the FINAL reduced output only.
-    REPS = int(os.environ.get("PA_VMASK_REPS", "10"))  # intermittent race -> need enough reps to detect reliably
+    REPS = int(
+        os.environ.get("PA_VMASK_REPS", "10")
+    )  # intermittent race -> need enough reps to detect reliably
 
     def rd(o, so, sl):
         return cpu_reduce_v1(
