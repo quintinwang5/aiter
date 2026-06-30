@@ -43,7 +43,9 @@ torch.set_default_device("cuda")
 PA_HEAD_DIM = 64
 PA_PAGE_SIZE = 256
 PA_GQA_RATIO = 8
-PA_TILE_Q = 16  # kernel TileQ (tq16-only); mtp must be < PA_TILE_Q / gqa (= 2) -> mtp in {0,1}
+PA_TILE_Q = (
+    16  # kernel TileQ (tq16-only); mtp must be < PA_TILE_Q / gqa (= 2) -> mtp in {0,1}
+)
 
 fp8 = dtypes.fp8
 
