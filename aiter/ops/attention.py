@@ -504,6 +504,7 @@ def pa_decode_bf16_asm(
         if x is None:
             return torch.ones(1, dtype=torch.float32, device=device)
         return x.to(torch.float32).contiguous()
+
     query_scale = _scale_t(query_scale)
     key_scale = _scale_t(key_scale)
     value_scale = _scale_t(value_scale)
