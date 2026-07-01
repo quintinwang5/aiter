@@ -1,3 +1,8 @@
 qdtype,kvdtype,hdim,page_size,gqa,tile_q,knl_name,co_name
-fp8,fp8,64,256,8,16,_ZN5aiter36pa_decode_bf16_d64_page256_gqa8_tq16E,pa_decode_bf16_d64_page256_gqa8_tq16.co
-fp8,fp8,64,256,8,8,_ZN5aiter41pa_decode_bf16_d64_page256_gqa8_tq16_mtp0E,pa_decode_bf16_d64_page256_gqa8_tq16_mtp0.co
+# mtp1 = full kernel (rb0+rb1). tile_q=16 -> handles mtp=1 (16 rows); also the
+# fallback for mtp=0 if mtp0 kernel absent. routed for mtp=1 ((1+1)*8=16<=16).
+fp8,fp8,64,256,8,16,_ZN5aiter36pa_decode_bf16_d64_page256_gqa8_mtp1E,pa_decode_bf16_d64_page256_gqa8_mtp1.co
+# mtp0 = lean kernel (rb1 softmax removed). tile_q=8 ROUTING trick: heuristic picks
+# smallest usable tile_q with (mtp+1)*gqa<=tile_q, so mtp=0 (8<=8) picks this;
+# mtp=1 (16>8) falls back to mtp1. distinct knl_name -> no CFG/impl-cache collision.
+fp8,fp8,64,256,8,8,_ZN5aiter36pa_decode_bf16_d64_page256_gqa8_mtp0E,pa_decode_bf16_d64_page256_gqa8_mtp0.co
