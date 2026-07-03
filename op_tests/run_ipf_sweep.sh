@@ -16,7 +16,7 @@ set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
 SWEEP="$REPO/hsa/gfx1250/pa_decode_bf16/ipf_sweep"
-DEPLOY="$REPO/hsa/gfx1250/pa_decode_bf16/pa_decode_bf16_d64_page256_gqa8_tq16.co"
+DEPLOY="$REPO/hsa/gfx1250/pa_decode_bf16/pa_decode_bf16_d64_page256_gqa8_mtp1.co"
 TEST="$HERE/test_pa_decode_bf16_asm.py"
 
 CFG="${CFG:--b 1 -kvh 1 -c 16384 -m 0}"
