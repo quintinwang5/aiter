@@ -315,6 +315,31 @@ def compare_one(
     else:
         sink_asm = torch.full((Hq,), -1.0e30, dtype=torch.float32, device=device)
 
+    # SYMMETRIC WARMUP: triton got one UNTIMED full call above (its correctness run)
+    # before entering its timed perftest; give asm the same single untimed pre-run so
+    # both kernels enter their (identical) perftest warmup+timed loop equally warm.
+    aiter.pa_decode_bf16_asm(
+        Q_asm,
+        K_asm,
+        V_asm,
+        kv_indices,
+        seq_lens_kv,
+        scale,
+        kv_indptr,
+        gqa=gqa,
+        mtp=mtp,
+        query_scale=q_desc,
+        key_scale=k_desc,
+        value_scale=v_desc,
+        qo_indptr=qo_indptr,
+        work_indptr=work_indptr,
+        work_info=work_info,
+        split_o=split_o,
+        split_lse=split_lse,
+        sink=sink_asm,
+    )
+    torch.cuda.synchronize()
+
     out_stage, us_asm = run_pa_stage(
         Q_asm,
         K_asm,
