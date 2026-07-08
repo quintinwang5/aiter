@@ -476,14 +476,15 @@ def pa_decode_bf16_asm(
     kv_head_num = K.shape[1]
     q_head_num = kv_head_num * gqa
 
-    # tq16-ONLY: the deployed kernel is tile_q=16 (1 M-tile = 16 rows). A query tile
-    # holds (mtp+1)*gqa rows, so (mtp+1)*gqa <= 16; for gqa=8 that means mtp in {0,1}.
-    # tile_q=32 support was removed (see hsa/.../pa_decode_bf16.csv). mtp>=2 would need
-    # tq32 and is rejected here (the C-side kernel selector would otherwise find no
-    # usable tile and error less clearly).
-    assert mtp in (0, 1), (
-        f"pa_decode_bf16_asm: tq16-only kernel supports mtp in {{0,1}} (gqa={gqa}); "
-        f"got mtp={mtp}. (tile_q=32 / mtp>=2 support was removed.)"
+    # TILE-Q ROUTING: a query tile holds (mtp+1)*gqa rows, so the kernel's TILE_Q must
+    # satisfy (mtp+1)*gqa <= TILE_Q. For gqa=8: tq16 (1 M-tile, 16 rows) handles mtp in
+    # {0,1}; tq32 (2 M-tiles, 32 rows, rb0=M0/rb1=M1) handles mtp in {2,3}. The C-side
+    # selector (get_heuristic_kernel_pa_decode_bf16) picks the SMALLEST usable tile_q from
+    # the CSV manifest, so with the tile_q=32 row present mtp>=2 auto-routes to the tq32 co
+    # (kernelName=None). No explicit kernelName needed.
+    assert (mtp + 1) * gqa <= 32, (
+        f"pa_decode_bf16_asm: (mtp+1)*gqa = {(mtp + 1) * gqa} > 32 (max TILE_Q=32); "
+        f"mtp={mtp} gqa={gqa} unsupported (tq16 covers mtp<=1, tq32 covers mtp 2,3)."
     )
 
     if out is None:

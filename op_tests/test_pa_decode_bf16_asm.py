@@ -44,7 +44,8 @@ PA_HEAD_DIM = 64
 PA_PAGE_SIZE = 256
 PA_GQA_RATIO = 8
 PA_TILE_Q = (
-    16  # kernel TileQ (tq16-only); mtp must be < PA_TILE_Q / gqa (= 2) -> mtp in {0,1}
+    32  # max kernel TileQ: tq16 handles mtp<2, tq32 handles mtp<4. mtp must be <
+    # PA_TILE_Q/gqa (=4) -> mtp in {0,1,2,3}. attention.py routes mtp>=2 to the tq32 co.
 )
 
 fp8 = dtypes.fp8
