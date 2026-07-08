@@ -58,8 +58,7 @@ def rms_rel(ref: torch.Tensor, out: torch.Tensor) -> float:
     return float((out - ref).pow(2).mean().sqrt() / denom)
 
 
-@perftest(num_rotate_args=1)
-def run_triton(
+def _call_triton(
     query,
     key_cache,
     value_cache,
@@ -75,8 +74,15 @@ def run_triton(
     k_descale,
     v_descale,
     sinks,
+    skip_reduce,
 ):
-    unified_attention(
+    # skip_reduce=True: on the 3d split path (NUM_SEGMENTS>1, used for long-ctx decode)
+    # unified_attention returns per-segment partials and DOES NOT launch reduce_segments,
+    # so the timed GPU work excludes the combine kernel -> apples-to-apples with the asm
+    # us (which excludes its host cpu_reduce_v1). On the gfx1250 2d single-pass path
+    # (short/medium decode) there is no separate reduce, so skip_reduce is a no-op and
+    # `out` is written normally.
+    return unified_attention(
         q=query,
         k=key_cache,
         v=value_cache,
@@ -96,8 +102,14 @@ def run_triton(
         sinks=sinks,
         output_scale=None,
         shuffled_kv_cache=True,
+        skip_reduce=skip_reduce,
     )
-    return output
+
+
+@perftest(num_rotate_args=1)
+def run_triton(*args):
+    _call_triton(*args)
+    return None
 
 
 def compare_one(
@@ -109,6 +121,7 @@ def compare_one(
     varlen=False,
     use_sink=False,
     context_lens=None,
+    triton_skip_reduce=True,
 ):
     gqa = PA_GQA_RATIO
     head_dim = PA_HEAD_DIM
@@ -176,22 +189,7 @@ def compare_one(
     v_desc = torch.tensor([value_scale], dtype=torch.float32, device=device)
 
     sink_tri = sinks if use_sink else None
-
-    # ---- common byte count (identical problem -> identical traffic for both) ----
-    # PA-decode is memory-bound: KV pages (fp8, K+V) dominate, plus Q in + O out.
-    seq_lens_kv = torch.tensor(kv_lens_list, dtype=torch.int32, device=device)
-    actual_blocks = ceil_div(seq_lens_kv, page_size)
-    kv_tokens = int(actual_blocks.sum().item()) * page_size
-    kv_bytes = kv_tokens * kv_head_num * head_dim * key_cache_orig.element_size() * 2
-    q_bytes = query.numel() * query.element_size()
-    o_bytes = output.numel() * output.element_size()
-    total_bytes = kv_bytes + q_bytes + o_bytes
-
-    def tbps(us):
-        return round((total_bytes / (us * 1e-6)) / 1e12, 2) if us > 0 else 0.0
-
-    # ================= TRITON =================
-    out_tri, us_tri = run_triton(
+    triton_args = (
         query,
         key_cache,
         value_cache,
@@ -208,6 +206,27 @@ def compare_one(
         v_desc,
         sink_tri,
     )
+
+    # ---- common byte count (identical problem -> identical traffic for both) ----
+    # PA-decode is memory-bound: KV pages (fp8, K+V) dominate, plus Q in + O out.
+    seq_lens_kv = torch.tensor(kv_lens_list, dtype=torch.int32, device=device)
+    actual_blocks = ceil_div(seq_lens_kv, page_size)
+    kv_tokens = int(actual_blocks.sum().item()) * page_size
+    kv_bytes = kv_tokens * kv_head_num * head_dim * key_cache_orig.element_size() * 2
+    q_bytes = query.numel() * query.element_size()
+    o_bytes = output.numel() * output.element_size()
+    total_bytes = kv_bytes + q_bytes + o_bytes
+
+    def tbps(us):
+        return round((total_bytes / (us * 1e-6)) / 1e12, 2) if us > 0 else 0.0
+
+    # ================= TRITON =================
+    # Correctness (UNTIMED, skip_reduce=False): full attention writes `output`.
+    _call_triton(*triton_args, False)
+    torch.cuda.synchronize()
+    out_tri = output
+    # Timing: skip_reduce controls whether the split-combine kernel is included.
+    _, us_tri = run_triton(*triton_args, triton_skip_reduce)
     torch.cuda.synchronize()
     ref_tri = ref_paged_attn(
         query=query,
@@ -349,6 +368,16 @@ def compare_one(
     )
     nrms_asm = rms_rel(ref_asm, out_asm)
 
+    # FAIRNESS FLAG: us_asm times ONLY the pa_decode_bf16_asm kernel; the host-side
+    # cpu_reduce_v1 that merges split_o/split_lse is NOT in the timer. For direct-O
+    # work (no split) that merge is a no-op so us_asm is complete; for split work it
+    # undercounts (triton's us includes its internal reduce). ploc (WorkInfo[:,1]) >= 0
+    # marks a split work item.
+    try:
+        asm_split = bool((work_info.reshape(-1, 8)[:, 1] >= 0).any().item())
+    except Exception:
+        asm_split = None
+
     return {
         "batch": batch,
         "kvh": kv_head_num,
@@ -365,6 +394,8 @@ def compare_one(
         "err_asm": err_asm,
         "nrms_asm": nrms_asm,
         "speedup(tri/asm)": round(us_tri / us_asm, 3) if us_asm > 0 else 0.0,
+        "asm_split": asm_split,  # True -> us_asm excludes host cpu_reduce_v1 (see note)
+        "tri_noreduce": triton_skip_reduce,  # True -> us_triton also excludes its reduce
     }
 
 
@@ -386,7 +417,15 @@ def main():
     )
     p.add_argument("--sink", action="store_true")
     p.add_argument("--context_lens", type=int, nargs="*", default=None)
+    p.add_argument(
+        "--triton_include_reduce",
+        action="store_true",
+        help="time the FULL triton unified_attention incl. its split-combine kernel "
+        "(default: exclude it via skip_reduce=True, to match the asm us which excludes "
+        "its host cpu_reduce_v1)",
+    )
     a = p.parse_args()
+    triton_skip_reduce = not a.triton_include_reduce
 
     rows = []
     if a.context_lens is not None:
@@ -401,13 +440,18 @@ def main():
                     a.varlen,
                     a.sink,
                     a.context_lens,
+                    triton_skip_reduce,
                 )
             )
     else:
         for b, kvh, c, mtp in itertools.product(
             a.batch_size, a.kv_head_num, a.ctx_len, a.mtp
         ):
-            rows.append(compare_one(b, kvh, c, mtp, a.scales, a.varlen, a.sink, None))
+            rows.append(
+                compare_one(
+                    b, kvh, c, mtp, a.scales, a.varlen, a.sink, None, triton_skip_reduce
+                )
+            )
 
     df = pd.DataFrame(rows)
     fmt = {c: "{:.2e}".format for c in ["nrms_triton", "nrms_asm"]}
@@ -417,6 +461,16 @@ def main():
         print("\n" + df.to_markdown(index=False))
     except Exception:
         pass
+    print(
+        "\nTIMING NOTE: both us are GPU-kernel time from the SAME perftest "
+        "(num_iters=101, warmup=2, device-side, excludes host/launch overhead).\n"
+        "  us_asm    = pa_decode_bf16_asm kernel ONLY (host cpu_reduce_v1 NOT timed).\n"
+        "  us_triton = unified_attention with skip_reduce="
+        f"{triton_skip_reduce} -> {'split-combine kernel EXCLUDED' if triton_skip_reduce else 'FULL, reduce included'}.\n"
+        "  Default (tri_noreduce=True) drops triton's reduce so BOTH exclude their "
+        "reduce -> apples-to-apples for split (asm_split=True) configs too.\n"
+        "  Pass --triton_include_reduce to time the full triton path instead."
+    )
 
 
 if __name__ == "__main__":
