@@ -476,11 +476,13 @@ def pa_decode_bf16_asm(
     kv_head_num = K.shape[1]
     q_head_num = kv_head_num * gqa
 
-    # DIAGNOSTIC: FORCE_TQ32=1 forces the tq32 kernel for ALL mtp (incl 0,1) so a
-    # tq32-vs-tq16 regression at mtp 0,1 isolates a tq32-build-wide bug (some opt broke
-    # under 2 M-tiles) from an M1-specific (mtp>=2) bug. Remove after debugging.
+    # DIAGNOSTIC: FORCE_TQ32=1 forces the tq32 kernel. NOTE: the deployed tq32 co is now
+    # mtp>=2-only (the M-tile1 Q load/store s_mtp<2 skip branches were hardcoded away for
+    # the mtp in {2,3} routing), so forcing it at mtp<2 produces WRONG results. Guarded to
+    # mtp>=2. (Was: forced for ALL mtp to isolate tq32-build-wide vs M1-specific bugs.)
     import os as _os
     if kernelName is None and _os.environ.get("FORCE_TQ32") == "1":
+        assert mtp >= 2, "FORCE_TQ32 unsupported for mtp<2: tq32 co is mtp>=2-only"
         kernelName = "_ZN5aiter36pa_decode_bf16_d64_page256_gqa8_tq32E"
 
     # TILE-Q ROUTING: a query tile holds (mtp+1)*gqa rows, so the kernel's TILE_Q must
